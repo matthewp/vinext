@@ -40,6 +40,9 @@ import {
   hasVerbatimResponseVary,
   supportsCanonicalRscWarmup,
   cacheWarmupStatusSource,
+  finalizeCacheAdapterPrerenderOutput,
+  hasCacheAdapterPrerenderOutput,
+  formatVinextPrerenderLabel,
   requiresRouteCacheabilityProbeManifest,
   resolveVinextPrerenderDecision,
   type ResolvedVinextPrerenderConfig,
@@ -1863,7 +1866,11 @@ export async function deploy(options: DeployOptions): Promise<void> {
     viteConfigMetadata.cacheConfig,
   );
   const shouldEmitPrerenderPathManifest = !options.skipBuild && prerenderDecision;
-  const shouldPrerenderLocally = nextConfig.output === "export";
+  const shouldPrerenderLocally = Boolean(
+    prerenderDecision &&
+    (nextConfig.output === "export" ||
+      hasCacheAdapterPrerenderOutput(viteConfigMetadata.cacheConfig)),
+  );
   if (prerenderDecision && !shouldPrerenderLocally) {
     const trigger =
       prerenderDecision.reason === "flag" ? "--prerender-all" : "vinext prerender config";
@@ -1916,10 +1923,10 @@ export async function deploy(options: DeployOptions): Promise<void> {
     });
   }
 
-  // Step 6a: static export still requires local prerendered artifacts. Worker
-  // deployments render through the deployed Worker during CDN pre-warming.
-  if (shouldPrerenderLocally) {
-    console.log("\n  Pre-rendering all routes (output: 'export')...");
+  // Step 6a: static exports and adapters that package prerender output still
+  // require local artifacts. Other Worker deployments render during prewarming.
+  if (shouldPrerenderLocally && prerenderDecision) {
+    console.log(`\n  ${formatVinextPrerenderLabel(prerenderDecision)}`);
     if (nextConfig.enablePrerenderSourceMaps) {
       process.setSourceMapsEnabled(true);
       Error.stackTraceLimit = Math.max(Error.stackTraceLimit, 50);
@@ -1930,6 +1937,9 @@ export async function deploy(options: DeployOptions): Promise<void> {
       nextConfig,
       routeRootConfig: viteConfigMetadata.routeRootConfig,
     });
+    if (nextConfig.output !== "export") {
+      await finalizeCacheAdapterPrerenderOutput(viteConfigMetadata.cacheConfig, info.root);
+    }
   }
 
   // Step 6b: TPR — pre-render hot pages into KV cache (experimental, opt-in)
