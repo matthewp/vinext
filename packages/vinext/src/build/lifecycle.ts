@@ -210,7 +210,7 @@ async function buildHybridPagesBundle(
   await pagesBuilder.buildApp();
 }
 
-export function prepareBuildOutput(
+function prepareBuildOutput(
   context: BuildLifecycleContext,
   emptyOutDir = context.emptyOutDir,
 ): void {
@@ -323,19 +323,6 @@ function disposeBuild(state: BuildLifecycleState): void {
   clearPagesClientAssetsBuildMetadata(session);
   if (process.env.__VINEXT_PAGES_CLIENT_ASSETS_BUILD_SESSION === session) {
     delete process.env.__VINEXT_PAGES_CLIENT_ASSETS_BUILD_SESSION;
-  }
-}
-
-export async function runBuildLifecycle(
-  builder: ViteBuilder,
-  context: BuildLifecycleContext,
-): Promise<void> {
-  const state = prepareBuild(context);
-  try {
-    await builder.buildApp();
-    await finalizeBuild(builder, context);
-  } finally {
-    disposeBuild(state);
   }
 }
 
