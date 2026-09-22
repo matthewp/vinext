@@ -3109,6 +3109,122 @@ describe("window.next debug global", () => {
     },
   );
 
+  it("normalizes string and object router hrefs before applying basePath", async () => {
+    const previousWindow = (globalThis as any).window;
+    const previousBasePath = process.env.__NEXT_ROUTER_BASEPATH;
+    const pushState = vi.fn();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.__NEXT_ROUTER_BASEPATH = "/docs";
+    (globalThis as any).window = {
+      location: {
+        pathname: "/docs/start",
+        search: "",
+        hash: "",
+        href: "http://localhost/docs/start",
+        origin: "http://localhost",
+      },
+      history: { state: null, pushState, replaceState() {} },
+      addEventListener() {},
+      dispatchEvent() {},
+      scrollTo() {},
+      __NEXT_DATA__: { page: "/posts/[id]" },
+    };
+
+    try {
+      vi.resetModules();
+      const routerModule = await import("../packages/vinext/src/shims/router.js");
+
+      await routerModule.default.push("//localhost/outside", undefined, { shallow: true });
+      await routerModule.default.push({ pathname: "//localhost/object" }, undefined, {
+        shallow: true,
+      });
+      await routerModule.default.push(
+        "/target",
+        { pathname: "//localhost/masked" },
+        {
+          shallow: true,
+        },
+      );
+      await routerModule.default.push({ pathname: "/literal//question?mark#hash" }, undefined, {
+        shallow: true,
+      });
+      await routerModule.default.push({ pathname: "https://example.com/foo//bar" }, undefined, {
+        shallow: true,
+      });
+      await routerModule.default.push({ pathname: "/hash", hash: "a//b" }, undefined, {
+        shallow: true,
+        scroll: false,
+      });
+      await routerModule.default.push({ hash: "a//b" }, undefined, {
+        shallow: true,
+        scroll: false,
+      });
+      await routerModule.default.push({ pathname: null, hash: "a//b" }, undefined, {
+        shallow: true,
+        scroll: false,
+      });
+
+      expect(pushState).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ url: "/localhost/outside", as: "/localhost/outside" }),
+        "",
+        "/docs/localhost/outside",
+      );
+      expect(pushState).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ url: "/localhost/object", as: "/localhost/object" }),
+        "",
+        "/docs/localhost/object",
+      );
+      expect(pushState).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({ url: "/target", as: "/localhost/masked" }),
+        "",
+        "/docs/localhost/masked",
+      );
+      expect(pushState).toHaveBeenNthCalledWith(
+        4,
+        expect.objectContaining({
+          url: "/literal/question%3Fmark%23hash",
+          as: "/literal/question%3Fmark%23hash",
+        }),
+        "",
+        "/docs/literal/question%3Fmark%23hash",
+      );
+      expect((globalThis as any).window.location.href).toBe("https://example.com/foo/bar");
+      expect(pushState).toHaveBeenNthCalledWith(
+        5,
+        expect.objectContaining({ url: "/hash#a/b", as: "/hash#a/b" }),
+        "",
+        "/docs/hash#a/b",
+      );
+      expect(pushState).toHaveBeenNthCalledWith(
+        6,
+        expect.objectContaining({ url: "/start#a/b", as: "/start#a/b" }),
+        "",
+        "/docs/start#a/b",
+      );
+      expect(pushState).toHaveBeenNthCalledWith(
+        7,
+        expect.objectContaining({ url: "/start#a/b", as: "/start#a/b" }),
+        "",
+        "/docs/start#a/b",
+      );
+      expect(consoleError).toHaveBeenCalledTimes(8);
+      expect(consoleError).toHaveBeenNthCalledWith(
+        1,
+        "Invalid href '//localhost/outside' passed to next/router in page: '/posts/[id]'. Repeated forward-slashes (//) or backslashes \\ are not valid in the href.",
+      );
+    } finally {
+      consoleError.mockRestore();
+      if (previousBasePath === undefined) delete process.env.__NEXT_ROUTER_BASEPATH;
+      else process.env.__NEXT_ROUTER_BASEPATH = previousBasePath;
+      if (previousWindow === undefined) delete (globalThis as any).window;
+      else (globalThis as any).window = previousWindow;
+      vi.resetModules();
+    }
+  });
+
   it.each([
     [
       "href",
@@ -3306,6 +3422,8 @@ describe("window.next debug global", () => {
     [{ protocol: "http:", query: { x: "1" } }, "/dir/current?x=1"],
     [{ protocol: "http:", hash: "section" }, "/dir/current#section"],
     [{ protocol: "HTTP:", hostname: "localhost", pathname: "/target" }, "/dir/localhost/target"],
+    [{ protocol: "http:", hash: "a//b" }, "/dir/current#a/b"],
+    [{ protocol: "http:", hash: "a\\b" }, "/dir/current#a/b"],
   ])(
     "resolves same-scheme protocol objects relative to the router pathname",
     async (url, expected) => {
@@ -17837,10 +17955,11 @@ describe("Pages Router concurrent navigation", () => {
   }
 
   it.each([
-    ["without authority fields", { pathname: "sibling" }],
-    ["with standalone auth", { pathname: "sibling", auth: "unused" }],
-    ["with standalone port", { pathname: "sibling", port: 3000 }],
-  ])("resolves a relative object as value against router.pathname %s", async (_case, as) => {
+    { as: { pathname: "sibling" }, expectedAs: "/fr/dir/sibling" },
+    { as: { pathname: "sibling//leaf" }, expectedAs: "/fr/dir/sibling/leaf" },
+    { as: { pathname: "sibling", auth: "unused" }, expectedAs: "/fr/dir/sibling" },
+    { as: { pathname: "sibling", port: 3000 }, expectedAs: "/fr/dir/sibling" },
+  ])("resolves object as $as against router.pathname", async (testCase) => {
     const previousWindow = (globalThis as any).window;
     const previousBasePath = process.env.__NEXT_ROUTER_BASEPATH;
     process.env.__NEXT_ROUTER_BASEPATH = "/docs";
@@ -17861,12 +17980,14 @@ describe("Pages Router concurrent navigation", () => {
       vi.resetModules();
       const Router = (await import("../packages/vinext/src/shims/router.js")).default;
 
-      await expect(Router.push("/target", as, { locale: "fr", shallow: true })).resolves.toBe(true);
+      await expect(
+        Router.push("/target", testCase.as, { locale: "fr", shallow: true }),
+      ).resolves.toBe(true);
 
       expect(pushState).toHaveBeenCalledWith(
-        expect.objectContaining({ url: "/fr/target", as: "/fr/dir/sibling" }),
+        expect.objectContaining({ url: "/fr/target", as: testCase.expectedAs }),
         "",
-        "/docs/fr/dir/sibling",
+        `/docs${testCase.expectedAs}`,
       );
     } finally {
       if (previousBasePath === undefined) delete process.env.__NEXT_ROUTER_BASEPATH;

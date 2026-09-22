@@ -97,6 +97,8 @@ import {
 import { assertSafeNavigationUrl } from "./url-safety.js";
 import { interpolateDynamicRouteHref } from "./internal/interpolate-as.js";
 import { formatUrlObject, formatUrlObjectWithValidation } from "./internal/format-url-object.js";
+import { normalizeRouterHref } from "./internal/normalize-router-href.js";
+import { getCurrentRoutePathnameForWarning } from "./internal/route-pattern-for-warning.js";
 import { getCurrentBrowserLocale } from "./client-locale.js";
 import { getDeploymentId, NEXT_DEPLOYMENT_ID_HEADER } from "../utils/deployment-id.js";
 import type { RequestContext } from "../config/config-matchers.js";
@@ -543,10 +545,14 @@ function resolveUrlObjectPath(formatted: string): string {
   }
 }
 
+function hasUrlObjectAuthority(url: UrlObject): boolean {
+  return Boolean(url.host || url.hostname || url.slashes);
+}
+
 function resolveUrl(url: string | UrlObject, resolveQueryFromRoute = false): string {
   if (typeof url === "string") return url;
   const formatted = formatUrlObject(url);
-  if (url.protocol || url.host || url.hostname || url.slashes || url.pathname) {
+  if (url.protocol || hasUrlObjectAuthority(url) || url.pathname) {
     return resolveUrlObjectPath(formatted);
   }
   const visiblePathname =
@@ -591,10 +597,6 @@ function hasUrlObjectQuery(url: UrlObject): boolean {
     : url.query !== null && typeof url.query === "object" && Object.keys(url.query).length > 0;
 }
 
-function validateUrlObject(url: Url | undefined): void {
-  if (url && typeof url !== "string") formatUrlObjectWithValidation(url);
-}
-
 function inheritsVisiblePath(url: UrlObject): boolean {
   return (
     !url.pathname &&
@@ -602,6 +604,24 @@ function inheritsVisiblePath(url: UrlObject): boolean {
       (typeof url.search === "string" && url.search.length > 0) ||
       (typeof url.hash === "string" && url.hash.length > 0))
   );
+}
+
+function prepareUrl(url: Url): Url {
+  const routePathname = getCurrentRoutePathnameForWarning();
+  if (typeof url === "string") return normalizeRouterHref(url, routePathname);
+  const formatted = formatUrlObjectWithValidation(url);
+  const normalized = normalizeRouterHref(formatted, routePathname);
+  if (normalized === formatted) return url;
+
+  if (!hasUrlObjectAuthority(url) && (url.protocol || url.pathname)) {
+    return resolveUrlObjectPath(normalized);
+  }
+
+  // Keep pathless objects identifiable so resolveUrl can inherit the current
+  // visible pathname and query after normalizing a hash-only input.
+  if (!url.pathname && normalized.startsWith("#")) return { ...url, hash: normalized };
+
+  return normalized;
 }
 
 /** Derive the browser-visible navigation target before route identity is resolved. */
@@ -4246,13 +4266,13 @@ function navigatePagesRouter(
   mode: "push" | "replace",
 ): Promise<boolean> {
   if (typeof window === "undefined") throwNoRouterInstance();
-  // Keep validation synchronous so dangerous URLs thrown from React event
-  // handlers surface through React instead of becoming unobserved rejections.
-  validateUrlObject(url);
-  validateUrlObject(as);
-  assertSafeNavigationUrl(resolveUrl(url));
-  if (as) assertSafeNavigationUrl(resolveUrl(as));
-  return performNavigation(url, as, options, mode);
+  // Keep preparation and validation synchronous so URL warnings and unsafe-URL
+  // errors from React event handlers surface instead of becoming unobserved rejections.
+  const preparedUrl = prepareUrl(url);
+  const preparedAs = as ? prepareUrl(as) : undefined;
+  assertSafeNavigationUrl(resolveUrl(preparedUrl));
+  if (preparedAs) assertSafeNavigationUrl(resolveUrl(preparedAs));
+  return performNavigation(preparedUrl, preparedAs, options, mode);
 }
 
 const RouterMethods = {

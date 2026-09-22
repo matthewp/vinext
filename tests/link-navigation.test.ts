@@ -1311,6 +1311,25 @@ describe("Pages Router Link onClick semantics", () => {
     ]);
   });
 
+  it("normalises a dynamic route pattern before forwarding an explicit as value", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await renderPagesRouterLinkAndClick({
+        href: "/posts//[id]",
+        props: { as: "/posts/1" },
+      });
+
+      expect(result.pagesRouterCalls).toEqual([
+        { href: "/posts/[id]", as: "/posts/1", replace: false },
+      ]);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Invalid href '/posts//[id]'"),
+      );
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
   it("preserves a basePath page when navigating to a hash link", async () => {
     // Ported from Next.js: test/e2e/basepath/query-hash.test.ts
     // https://github.com/vercel/next.js/blob/canary/test/e2e/basepath/query-hash.test.ts
@@ -3394,6 +3413,61 @@ describe("Link prefetch scheduling", () => {
         });
       }
       expect(result.pagePrefetchLinks).toEqual([]);
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("does not prefetch a masked Pages link with a dangerous hidden route", async () => {
+    const observer = stubIntersectionObserver();
+    const rootLoader = vi.fn(async () => ({ default: null }));
+    const result = await renderIsolatedLink({
+      appNavigation: false,
+      href: "javascript:alert(1)",
+      nodeEnv: "production",
+      props: { as: "/safe" },
+      windowOverrides: {
+        __NEXT_DATA__: { buildId: "build-id" },
+        __VINEXT_PAGE_LOADERS__: { "/": rootLoader },
+        __VINEXT_PAGE_PATTERNS__: ["/"],
+        __VINEXT_PAGES_SSG_PATTERNS__: ["/"],
+        __VINEXT_PAGES_SSP_PATTERNS__: [],
+      },
+    });
+
+    try {
+      expect(observer.observe).not.toHaveBeenCalled();
+      observer.dispatchIntersectingEntry(result.anchor, true);
+      result.capturedAnchorProps.onMouseEnter?.({ currentTarget: result.anchor });
+      await flushPrefetchTasks();
+
+      expect(rootLoader).not.toHaveBeenCalled();
+      expect(result.fetch).not.toHaveBeenCalled();
+      expect(result.pagePrefetchLinks).toEqual([]);
+    } finally {
+      result.restoreNodeEnv();
+    }
+  });
+
+  it("prefetches an App link by a safe as when its hidden href is dangerous", async () => {
+    vi.stubEnv("__VINEXT_HAS_PAGES_ROUTER", "true");
+    const observer = stubIntersectionObserver();
+    const result = await renderIsolatedLink({
+      href: "javascript:alert(1)",
+      nodeEnv: "production",
+      props: { as: "/viewport-prefetch-target" },
+    });
+
+    try {
+      expect(observer.observe).toHaveBeenCalledWith(result.anchor);
+      observer.dispatchIntersectingEntry(result.anchor);
+      await waitForFetchCalls(result.fetch, 1);
+
+      expectCanonicalRscFetchCall(
+        result.fetch.mock.calls[0],
+        "/viewport-prefetch-target",
+        expect.objectContaining({ priority: "low" }),
+      );
     } finally {
       result.restoreNodeEnv();
     }
