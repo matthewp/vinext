@@ -2385,8 +2385,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         buildLifecycleEnabled =
           env.command === "build" &&
           !internalOptions.__skipBuildLifecycle &&
-          (buildLifecycleInvocation !== undefined ||
-            claimViteCliBuildInvocation());
+          (buildLifecycleInvocation !== undefined || claimViteCliBuildInvocation());
         root = toSlash(config.root ?? process.cwd());
         const userResolve = config.resolve as UserResolveConfigWithTsconfigPaths | undefined;
         let tsconfigPathAliases: Record<string, string> = {};
@@ -3059,6 +3058,8 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // top level (single-build client output) so RSC/SSR stay untouched.
         const shouldInjectPlainPagesEnvironments =
           !hasAppDir && !hasCloudflarePlugin && !isSSR && !hasBuildInput;
+        const shouldSharePagesBuildConfig =
+          shouldInjectPlainPagesEnvironments || (!hasAppDir && hasCloudflarePlugin);
         const hasClientBuildEnvironment =
           hasAppDir || hasCloudflarePlugin || hasNitroPlugin || shouldInjectPlainPagesEnvironments;
         const clientAssetsDir = resolveAssetsDir(nextConfig.assetPrefix ?? "");
@@ -3114,7 +3115,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           // The Vite CLI uses its legacy single-environment path unless a
           // builder config exists. Plain Pages projects define the exact
           // client and SSR environments below, so opt into buildApp for them.
-          ...(shouldInjectPlainPagesEnvironments
+          ...(shouldSharePagesBuildConfig
             ? { builder: { ...config.builder, sharedConfigBuild: true } }
             : {}),
           build: {
