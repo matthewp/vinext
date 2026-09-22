@@ -65,7 +65,9 @@ export type VinextResponseStageCacheability = {
  * them over in-process dispatch, platform RPC, a service binding, or HTTP. If
  * it caches shared dispatches, its baseline identity must include the request
  * method, complete request URL (including scheme, authority, exact path, and
- * query), plus the complete serialized props. An adapter that advertises
+ * query), plus the complete serialized props. A transport may omit query
+ * values only for framework-certified query-independent artifacts protected by
+ * completed-response admission. An adapter that advertises
  * `responseVary: "verbatim"` must also partition stored variants by every
  * request header named in the returned `Vary` fields and reject `Vary: *` from
  * storage. Adapters without that capability must reject application-defined

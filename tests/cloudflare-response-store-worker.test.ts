@@ -81,6 +81,93 @@ describe("Cloudflare Response Store Worker", () => {
     }
   });
 
+  it("shares query-independent App page cache identities across search params", async () => {
+    stages.request.mockImplementation((request, _env, _context, dispatchResponseStage) => {
+      const url = new URL(request.url);
+      return dispatchResponseStage(
+        request,
+        {
+          cacheability: { policyHeaders: null },
+          forceDynamic: false,
+          kind: "app-page",
+          resolvedUrl: url.pathname + url.search,
+        },
+        { cache: "shared" },
+      );
+    });
+    const keys: Request[] = [];
+    const store = {
+      fetch: vi.fn(async (request: Request) => {
+        keys.push(request);
+        return new Response("cached", { headers: { "Cache-Control": "public, max-age=60" } });
+      }),
+      getTagExpiration: vi.fn(async () => 0),
+      purge: vi.fn(),
+      put: vi.fn(),
+      refresh: vi.fn(),
+    };
+    const handler = createVinextResponseStoreHandler(store);
+    const context = { passThroughOnException: vi.fn(), waitUntil: vi.fn() };
+
+    for (const query of ["first", "second"]) {
+      const response = await handler.fetch(
+        new Request(`https://example.com/page?filter=${query}`),
+        {} as never,
+        context,
+      );
+      await response.body?.cancel();
+    }
+
+    expect(keys).toHaveLength(2);
+    expect(keys[1]?.url).toBe(keys[0]?.url);
+    expect(keys[0]?.url).toMatch(
+      /^https:\/\/example\.com\/page\?__workers_response_store=v1\.[0-9a-f]{64}$/,
+    );
+  });
+
+  it("shares Pages ISR cache identities without dropping dynamic path params", async () => {
+    stages.request.mockImplementation((request, _env, _context, dispatchResponseStage) => {
+      const url = new URL(request.url);
+      return dispatchResponseStage(
+        request,
+        {
+          cacheability: { policyHeaders: null },
+          kind: "pages-page",
+          renderOptions: { originalUrl: url.pathname + url.search },
+          resolvedUrl: url.pathname + url.search,
+          stagedHeaders: null,
+        },
+        { cache: "shared" },
+      );
+    });
+    const keys: Request[] = [];
+    const store = {
+      fetch: vi.fn(async (request: Request) => {
+        keys.push(request);
+        return new Response("cached", { headers: { "Cache-Control": "public, max-age=60" } });
+      }),
+      getTagExpiration: vi.fn(async () => 0),
+      purge: vi.fn(),
+      put: vi.fn(),
+      refresh: vi.fn(),
+    };
+    const handler = createVinextResponseStoreHandler(store);
+    const context = { passThroughOnException: vi.fn(), waitUntil: vi.fn() };
+
+    for (const url of [
+      "https://example.com/posts/first?utm=one",
+      "https://example.com/posts/first?utm=two",
+      "https://example.com/posts/second?utm=one",
+    ]) {
+      const response = await handler.fetch(new Request(url), {} as never, context);
+      await response.body?.cancel();
+    }
+
+    expect(keys).toHaveLength(3);
+    expect(keys[1]?.url).toBe(keys[0]?.url);
+    expect(keys[2]?.url).not.toBe(keys[0]?.url);
+  });
+
   it("sanitizes response-stage props once on cache hits", async () => {
     const toJSON = vi.fn(() => ({ kind: "app-page" }));
     stages.request.mockImplementation((request, _env, _context, dispatchResponseStage) =>

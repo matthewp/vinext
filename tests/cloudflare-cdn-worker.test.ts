@@ -668,6 +668,87 @@ describe("Cloudflare CDN multi-stage Worker facade", () => {
     expect(stages.response).not.toHaveBeenCalled();
   });
 
+  it("shares query-independent App page cache identities across search params", async () => {
+    const cacheFacingRequests: Request[] = [];
+    const binding = vi.fn(({ props }: { props: unknown }) => ({
+      fetch(request: Request) {
+        cacheFacingRequests.push(request);
+        return createEntrypoint(props).fetch(request);
+      },
+    }));
+    stages.response.mockImplementation((request) => Response.json({ url: request.url }));
+    stages.request.mockImplementation((request, _env, _ctx, dispatch) => {
+      const url = new URL(request.url);
+      return dispatch(
+        request,
+        {
+          cacheability: { policyHeaders: null },
+          forceDynamic: false,
+          kind: "app-page",
+          resolvedUrl: url.pathname + url.search,
+        },
+        { cache: "shared" },
+      );
+    });
+
+    const responses = [];
+    for (const query of ["first", "second"]) {
+      responses.push(
+        await worker.fetch(
+          new Request(`https://example.com/page?filter=${query}`),
+          {},
+          { exports: { VinextCachedResponse: binding } },
+        ),
+      );
+    }
+
+    expect(cacheFacingRequests).toHaveLength(2);
+    expect(cacheFacingRequests[1]?.url).toBe(cacheFacingRequests[0]?.url);
+    expect(cacheFacingRequests[0]?.url).toMatch(
+      /^https:\/\/example\.com\/page\?__vinext_cache_key=[0-9a-f]{64}$/,
+    );
+    await expect(responses[0]?.json()).resolves.toEqual({
+      url: "https://example.com/page?filter=first",
+    });
+    await expect(responses[1]?.json()).resolves.toEqual({
+      url: "https://example.com/page?filter=second",
+    });
+  });
+
+  it("keeps explicitly query-dependent App page cache identities isolated", async () => {
+    const cacheFacingRequests: Request[] = [];
+    const binding = vi.fn(() => ({
+      fetch(request: Request) {
+        cacheFacingRequests.push(request);
+        return new Response("cached");
+      },
+    }));
+    stages.request.mockImplementation((request, _env, _ctx, dispatch) => {
+      const url = new URL(request.url);
+      return dispatch(
+        request,
+        {
+          cacheability: { policyHeaders: [["Cache-Control", "public, s-maxage=60"]] },
+          forceDynamic: true,
+          kind: "app-page",
+          resolvedUrl: url.pathname + url.search,
+        },
+        { cache: "shared" },
+      );
+    });
+
+    for (const query of ["first", "second"]) {
+      await worker.fetch(
+        new Request(`https://example.com/page?filter=${query}`),
+        {},
+        { exports: { VinextCachedResponse: binding } },
+      );
+    }
+
+    expect(cacheFacingRequests).toHaveLength(2);
+    expect(cacheFacingRequests[1]?.url).not.toBe(cacheFacingRequests[0]?.url);
+  });
+
   it.each(["HIT", "MISS", "UPDATING"])(
     "exposes the response-entrypoint %s status through vinext cache headers",
     async (cacheStatus) => {

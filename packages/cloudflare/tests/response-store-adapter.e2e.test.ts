@@ -251,7 +251,7 @@ describe("Cloudflare Workers Response Store adapter", () => {
   test("passes adapter sharding into the Response Store", async () => {
     await Promise.all(
       Array.from({ length: 16 }, async (_, index) => {
-        const response = await request(`/cached/local?shard=${index}`);
+        const response = await request(`/cached/shard-${index}`);
         assert.equal(response.status, 200);
         await response.arrayBuffer();
       }),
@@ -288,14 +288,14 @@ describe("Cloudflare Workers Response Store adapter", () => {
   });
 
   test("caches App pages, App routes, Pages routes, and canonical RSC", async () => {
-    const firstPageResponse = await request("/cached/local", {
+    const firstPageResponse = await request("/cached/local?utm=first", {
       headers: { "x-request-id": "first" },
     });
     const firstPage = {
       body: await firstPageResponse.text(),
       status: firstPageResponse.headers.get("x-vinext-cache"),
     };
-    const secondPageResponse = await request("/cached/local", {
+    const secondPageResponse = await request("/cached/local?utm=second", {
       headers: { "x-request-id": "second" },
     });
     const secondPage = {
@@ -316,13 +316,17 @@ describe("Cloudflare Workers Response Store adapter", () => {
       assert.equal(secondPageResponse.headers.get(name), null);
     }
 
-    for (const pathname of ["/api/now", "/pages-prewarm"]) {
-      const first = await cacheStatus(pathname);
-      const second = await cacheStatus(pathname);
-      assert.equal(first.status, "MISS");
-      assert.equal(second.status, "HIT");
-      assert.equal(second.body, first.body);
-    }
+    const firstRoute = await cacheStatus("/api/now");
+    const secondRoute = await cacheStatus("/api/now");
+    assert.equal(firstRoute.status, "MISS");
+    assert.equal(secondRoute.status, "HIT");
+    assert.equal(secondRoute.body, firstRoute.body);
+
+    const firstPages = await cacheStatus("/pages-prewarm?utm=first");
+    const secondPages = await cacheStatus("/pages-prewarm?utm=second");
+    assert.equal(firstPages.status, "MISS");
+    assert.equal(secondPages.status, "HIT");
+    assert.equal(secondPages.body, firstPages.body);
 
     const init = { headers: { Accept: "text/x-component", RSC: "1" } };
     const firstRsc = await request("/cached/rsc.rsc?_rsc=", init);
@@ -358,7 +362,7 @@ describe("Cloudflare Workers Response Store adapter", () => {
     assert.match(rsc.headers.get("content-type") ?? "", /^text\/x-component/);
     assert.ok((await rsc.arrayBuffer()).byteLength > 0);
 
-    const retryPath = `${pathname}?retry=1`;
+    const retryPath = `/cached/retry-${crypto.randomUUID()}`;
     const storedHtml = await request(retryPath);
     assert.equal(storedHtml.headers.get("x-vinext-cache"), "MISS");
     await storedHtml.arrayBuffer();
@@ -369,7 +373,7 @@ describe("Cloudflare Workers Response Store adapter", () => {
     assert.equal(retriedWarmup.headers.get("x-vinext-cache"), "MISS");
     await retriedWarmup.arrayBuffer();
 
-    const repairedRsc = await request(`${retryPath}&_rsc`, {
+    const repairedRsc = await request(`${retryPath}?_rsc`, {
       headers: { Accept: "text/x-component", RSC: "1" },
     });
     assert.equal(repairedRsc.headers.get("x-vinext-cache"), "HIT");
@@ -377,8 +381,7 @@ describe("Cloudflare Workers Response Store adapter", () => {
   });
 
   test("publishes non-App-page warmups before returning", async () => {
-    for (const pathname of ["/api/now", "/pages-prewarm"]) {
-      const key = `${pathname}?warmup=${crypto.randomUUID()}`;
+    for (const key of [`/api/now?warmup=${crypto.randomUUID()}`, "/pages-prewarm"]) {
       const warmed = await request(key, {
         headers: { "user-agent": "vinext-cloudflare-cdn-warm" },
       });
@@ -457,8 +460,8 @@ describe("Cloudflare Workers Response Store adapter", () => {
   });
 
   test("keeps dynamic and unsupported Vary responses out of shared storage", async () => {
-    const firstDynamic = await cacheStatus("/dynamic");
-    const secondDynamic = await cacheStatus("/dynamic");
+    const firstDynamic = await cacheStatus("/dynamic?filter=first");
+    const secondDynamic = await cacheStatus("/dynamic?filter=second");
     assert.equal(firstDynamic.status, "MISS");
     assert.equal(secondDynamic.status, "MISS");
     assert.notEqual(firstDynamic.body, secondDynamic.body);

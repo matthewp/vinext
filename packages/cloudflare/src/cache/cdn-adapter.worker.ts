@@ -17,6 +17,7 @@ import { loadVinextResponseStage } from "vinext/server/response-stage";
 import { traceCachedResponseStart } from "vinext/internal/server/response-start-tracing";
 import { isNonCacheableCacheControl } from "vinext/shims/cdn-cache";
 import { getVinextCdnBuildIdentity, VINEXT_CDN_BUILD_ID_HEADER } from "./cdn-build-id.js";
+import { responseStageCacheIdentity } from "./response-stage-cache-identity.js";
 
 type StageBinding = {
   fetch(request: Request): Promise<Response> | Response;
@@ -231,7 +232,7 @@ function getResponseStageBinding(
 
 async function createCacheFacingRequest(
   request: Request,
-  serializedInvocation: string,
+  invocation: CloudflareResponseStageInvocation,
 ): Promise<Request> {
   const authorization = request.headers.get("Authorization");
   let serializedRequestCf: string | null = null;
@@ -261,12 +262,18 @@ async function createCacheFacingRequest(
     [...FRAMEWORK_RESPONSE_VARY_FIELDS].map((name) => [name, request.headers.get(name)]),
   );
   const responseStageBuildIdentity = getVinextCdnBuildIdentity() ?? "";
+  const cacheIdentity = responseStageCacheIdentity(invocation.requestUrl, invocation.props);
+  const serializedCacheIdentity = JSON.stringify({
+    ...invocation,
+    props: cacheIdentity.props,
+    requestUrl: cacheIdentity.requestUrl,
+  });
   const bytes = new TextEncoder().encode(
-    `${request.url}\0${serializedInvocation}\0${authorizationIdentity}\0${frameworkVaryIdentity}\0${responseStageBuildIdentity}`,
+    `${cacheIdentity.requestUrl}\0${serializedCacheIdentity}\0${authorizationIdentity}\0${frameworkVaryIdentity}\0${responseStageBuildIdentity}`,
   );
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   const key = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  const url = new URL(request.url);
+  const url = new URL(cacheIdentity.requestUrl);
   url.searchParams.set("__vinext_cache_key", key);
   const headers = new Headers(request.headers);
   const requestCacheControl = headers.get("Cache-Control");
@@ -693,7 +700,7 @@ export default {
           return responseStageUnavailable();
         }
         const entrypointRequest = usesSharedCache
-          ? await createCacheFacingRequest(stageRequest, serializedInvocation)
+          ? await createCacheFacingRequest(stageRequest, invocation)
           : stageRequest;
         const response = validateResponseStageBuildIdentity(await binding.fetch(entrypointRequest));
         return usesSharedCache

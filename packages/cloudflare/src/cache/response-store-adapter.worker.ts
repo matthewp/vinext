@@ -33,6 +33,7 @@ import {
   setResponseStore,
   type ResponseStoreInvocationCapture,
 } from "./response-store-data.runtime.js";
+import { responseStageCacheIdentity } from "./response-stage-cache-identity.js";
 
 type WorkerExecutionContext = {
   exports?: Record<string, unknown>;
@@ -279,16 +280,17 @@ export function createVinextResponseStoreOptions<Env extends VinextResponseStore
 async function cacheRequest(invocation: StoredInvocation): Promise<Request> {
   // The stored loopback request includes transport headers that change on every
   // edge invocation; only stable response-stage selectors belong in the key.
+  const cacheIdentity = responseStageCacheIdentity(invocation.request.url, invocation.props);
   const identity = JSON.stringify([
     invocation.request.method,
-    invocation.request.url,
-    invocation.props,
+    cacheIdentity.requestUrl,
+    cacheIdentity.props,
     invocation.request.headers,
   ]);
   const digest = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity)),
   );
-  const url = new URL(invocation.request.url);
+  const url = new URL(cacheIdentity.requestUrl);
   url.searchParams.set(
     RESPONSE_STORE_KEY_PARAM,
     `v1.${[...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`,
