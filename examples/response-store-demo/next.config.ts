@@ -20,6 +20,10 @@ export default {
       source: "/query-dependent-public",
       headers: [{ key: "Cache-Control", value: "public, s-maxage=300" }],
     },
+    {
+      source: "/query-independent-public",
+      headers: [{ key: "Cache-Control", value: "public, s-maxage=300" }],
+    },
   ],
   rewrites: async () => [
     { source: "/query-rewrite/:slug", destination: "/cached/:slug" },

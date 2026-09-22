@@ -151,6 +151,47 @@ test("deployment pre-warming and force-dynamic bypass work with the configured c
   expect(JSON.parse(staticRouteBody).query).toBeNull();
 
   if (backend !== "kv") {
+    // `dynamic = "error"` makes request-data access fail, so sharing the
+    // successfully static Route Handler by pathname matches Next.js.
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/dynamic-data/dynamic-data.test.ts
+    const staticErrorFirst = await request.get(
+      `${baseURL}/api/query-independent-error?q=${randomUUID()}-first`,
+    );
+    const staticErrorBody = await staticErrorFirst.text();
+    const staticErrorSecond = await request.get(
+      `${baseURL}/api/query-independent-error?q=${randomUUID()}-second`,
+    );
+    expect(
+      staticErrorSecond.headers()[staticStatusHeader],
+      JSON.stringify(staticErrorSecond.headers()),
+    ).toBe("HIT");
+    expect(await staticErrorSecond.text()).toBe(staticErrorBody);
+
+    // Next's inner Full Route cache uses `resolvedPathname` for successfully
+    // static App pages and Route Handlers. Vinext intentionally keeps these
+    // two outer-cache cases full-query keyed until it has proof before lookup;
+    // that costs HITs but cannot replay query-dependent bytes across requests.
+    // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/templates/app-page-runtime.ts
+    // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/templates/app-route.ts
+    for (const path of ["/api/query-independent-revalidate", "/query-independent-public"]) {
+      const first = await request.get(`${baseURL}${path}?q=${randomUUID()}-first`);
+      const firstBody = await first.text();
+      const firstHit = await request.get(first.url());
+      const second = await request.get(`${baseURL}${path}?q=${randomUUID()}-second`);
+      const secondBody = await second.text();
+      const secondHit = await request.get(second.url());
+      expect(first.headers()[staticStatusHeader], JSON.stringify(first.headers())).toBe("MISS");
+      expect(firstHit.headers()[staticStatusHeader], JSON.stringify(firstHit.headers())).toBe(
+        "HIT",
+      );
+      expect(await firstHit.text()).toBe(firstBody);
+      expect(second.headers()[staticStatusHeader], JSON.stringify(second.headers())).toBe("MISS");
+      expect(secondHit.headers()[staticStatusHeader], JSON.stringify(secondHit.headers())).toBe(
+        "HIT",
+      );
+      expect(await secondHit.text()).toBe(secondBody);
+    }
+
     const queryA = `${randomUUID()}-a`;
     const queryB = `${randomUUID()}-b`;
     const firstA = await request.get(`${baseURL}/api/query-cache?q=${queryA}`);

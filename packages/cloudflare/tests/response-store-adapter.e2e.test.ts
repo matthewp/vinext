@@ -269,6 +269,34 @@ describe("Cloudflare Workers Response Store adapter", () => {
       assert.equal(await staticRouteSecond.text(), staticRouteBody);
       assert.equal(JSON.parse(staticRouteBody).query, null);
 
+      const staticErrorFirst = await inline.dispatchFetch(
+        "https://app.test/api/query-independent-error?q=first",
+      );
+      const staticErrorBody = await staticErrorFirst.text();
+      const staticErrorSecond = await inline.dispatchFetch(
+        "https://app.test/api/query-independent-error?q=second",
+      );
+      assert.equal(staticErrorFirst.headers.get("x-vinext-cache"), "MISS");
+      assert.equal(staticErrorSecond.headers.get("x-vinext-cache"), "HIT");
+      assert.equal(await staticErrorSecond.text(), staticErrorBody);
+
+      // Static eligibility alone is not pre-lookup proof for an outer adapter.
+      // Keep these conservative cases full-query keyed until such proof exists.
+      for (const path of ["/api/query-independent-revalidate", "/query-independent-public"]) {
+        const first = await inline.dispatchFetch(`https://app.test${path}?q=first`);
+        const firstBody = await first.text();
+        const firstHit = await inline.dispatchFetch(`https://app.test${path}?q=first`);
+        const second = await inline.dispatchFetch(`https://app.test${path}?q=second`);
+        const secondBody = await second.text();
+        const secondHit = await inline.dispatchFetch(`https://app.test${path}?q=second`);
+        assert.equal(first.headers.get("x-vinext-cache"), "MISS");
+        assert.equal(firstHit.headers.get("x-vinext-cache"), "HIT");
+        assert.equal(await firstHit.text(), firstBody);
+        assert.equal(second.headers.get("x-vinext-cache"), "MISS");
+        assert.equal(secondHit.headers.get("x-vinext-cache"), "HIT");
+        assert.equal(await secondHit.text(), secondBody);
+      }
+
       for (const query of ["unsafe-a", "unsafe-b"]) {
         const first = await inline.dispatchFetch(
           `https://app.test/api/query-dependent-revalidate?q=${query}`,
