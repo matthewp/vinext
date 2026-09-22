@@ -83,7 +83,9 @@ test("deployment pre-warming and force-dynamic bypass work with the configured c
   // Next.js keys a proven static App artifact by resolved pathname rather than
   // arbitrary public query parameters.
   // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/templates/app-page-runtime.ts
-  const queryIndependentPath = `/cached/query-${randomUUID()}`;
+  // KV proves the deploy-time seed; response-stage adapters use a cold path so
+  // this also proves that a different query reuses the admitted response.
+  const queryIndependentPath = backend === "kv" ? "/cached/intro" : `/cached/query-${randomUUID()}`;
   const firstStatic = await request.get(`${baseURL}${queryIndependentPath}?utm=first`, {
     headers: { accept: "text/html" },
   });
@@ -93,7 +95,7 @@ test("deployment pre-warming and force-dynamic bypass work with the configured c
   });
   const staticStatusHeader = backend === "workers-cache" ? "cf-cache-status" : "x-vinext-cache";
   expect(firstStatic.headers()[staticStatusHeader], JSON.stringify(firstStatic.headers())).toBe(
-    "MISS",
+    backend === "kv" ? "HIT" : "MISS",
   );
   expect(secondStatic.headers()[staticStatusHeader], JSON.stringify(secondStatic.headers())).toBe(
     "HIT",
