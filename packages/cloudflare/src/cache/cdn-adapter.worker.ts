@@ -17,7 +17,11 @@ import { loadVinextResponseStage } from "vinext/server/response-stage";
 import { traceCachedResponseStart } from "vinext/internal/server/response-start-tracing";
 import { isNonCacheableCacheControl } from "vinext/shims/cdn-cache";
 import { getVinextCdnBuildIdentity, VINEXT_CDN_BUILD_ID_HEADER } from "./cdn-build-id.js";
-import { responseStageCacheIdentity } from "./response-stage-cache-identity.js";
+import {
+  responseStageCacheIdentity,
+  restoreResponseStageCacheQuery,
+  type ResponseStageQueryRestore,
+} from "./response-stage-cache-identity.js";
 
 type StageBinding = {
   fetch(request: Request): Promise<Response> | Response;
@@ -40,6 +44,7 @@ type CloudflareResponseStageInvocation = {
   expectedResponseStageBuildIdentity?: string;
   options: VinextResponseStageDispatchOptions;
   props: unknown;
+  queryIndependent?: true;
   requestMethod: string;
   requestUrl: string;
 };
@@ -65,6 +70,7 @@ const AUTHORIZATION_TRANSPORT_HEADER = "x-vinext-internal-authorization";
 const REQUEST_CACHE_CONTROL_TRANSPORT_HEADER = "x-vinext-internal-request-cache-control";
 const REQUEST_CF_TRANSPORT_HEADER = "x-vinext-internal-request-cf";
 const REQUEST_PRAGMA_TRANSPORT_HEADER = "x-vinext-internal-request-pragma";
+const RESPONSE_STAGE_QUERY_TRANSPORT_HEADER = "x-vinext-internal-response-stage-query";
 const CLOUDFLARE_EDGE_POLICY_HEADER = "Cloudflare-CDN-Cache-Control";
 const SHARED_RESPONSE_STAGE_HEADER = "x-vinext-cloudflare-shared-response-stage";
 const RESPONSE_STAGE_WIRE_CACHE = {
@@ -143,7 +149,8 @@ function stripUntrustedTransportHeaders(request: Request): Request {
     !request.headers.has(AUTHORIZATION_TRANSPORT_HEADER) &&
     !request.headers.has(REQUEST_CACHE_CONTROL_TRANSPORT_HEADER) &&
     !request.headers.has(REQUEST_CF_TRANSPORT_HEADER) &&
-    !request.headers.has(REQUEST_PRAGMA_TRANSPORT_HEADER)
+    !request.headers.has(REQUEST_PRAGMA_TRANSPORT_HEADER) &&
+    !request.headers.has(RESPONSE_STAGE_QUERY_TRANSPORT_HEADER)
   ) {
     return request;
   }
@@ -152,6 +159,7 @@ function stripUntrustedTransportHeaders(request: Request): Request {
   headers.delete(REQUEST_CACHE_CONTROL_TRANSPORT_HEADER);
   headers.delete(REQUEST_CF_TRANSPORT_HEADER);
   headers.delete(REQUEST_PRAGMA_TRANSPORT_HEADER);
+  headers.delete(RESPONSE_STAGE_QUERY_TRANSPORT_HEADER);
   const sanitized = new Request(request, { headers });
   const requestCf = Reflect.get(request, "cf");
   if (requestCf !== undefined) {
@@ -233,6 +241,7 @@ function getResponseStageBinding(
 async function createCacheFacingRequest(
   request: Request,
   invocation: CloudflareResponseStageInvocation,
+  queryRestore?: ResponseStageQueryRestore,
 ): Promise<Request> {
   const authorization = request.headers.get("Authorization");
   let serializedRequestCf: string | null = null;
@@ -262,18 +271,13 @@ async function createCacheFacingRequest(
     [...FRAMEWORK_RESPONSE_VARY_FIELDS].map((name) => [name, request.headers.get(name)]),
   );
   const responseStageBuildIdentity = getVinextCdnBuildIdentity() ?? "";
-  const cacheIdentity = responseStageCacheIdentity(invocation.requestUrl, invocation.props);
-  const serializedCacheIdentity = JSON.stringify({
-    ...invocation,
-    props: cacheIdentity.props,
-    requestUrl: cacheIdentity.requestUrl,
-  });
+  const serializedCacheIdentity = JSON.stringify(invocation);
   const bytes = new TextEncoder().encode(
-    `${cacheIdentity.requestUrl}\0${serializedCacheIdentity}\0${authorizationIdentity}\0${frameworkVaryIdentity}\0${responseStageBuildIdentity}`,
+    `${invocation.requestUrl}\0${serializedCacheIdentity}\0${authorizationIdentity}\0${frameworkVaryIdentity}\0${responseStageBuildIdentity}`,
   );
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   const key = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  const url = new URL(cacheIdentity.requestUrl);
+  const url = new URL(invocation.requestUrl);
   url.searchParams.set("__vinext_cache_key", key);
   const headers = new Headers(request.headers);
   const requestCacheControl = headers.get("Cache-Control");
@@ -285,6 +289,7 @@ async function createCacheFacingRequest(
   headers.delete(REQUEST_CACHE_CONTROL_TRANSPORT_HEADER);
   headers.delete(REQUEST_CF_TRANSPORT_HEADER);
   headers.delete(REQUEST_PRAGMA_TRANSPORT_HEADER);
+  headers.delete(RESPONSE_STAGE_QUERY_TRANSPORT_HEADER);
   if (authorization !== null) {
     headers.set(AUTHORIZATION_TRANSPORT_HEADER, encodeURIComponent(authorization));
   }
@@ -296,6 +301,9 @@ async function createCacheFacingRequest(
   }
   if (requestPragma !== null) {
     headers.set(REQUEST_PRAGMA_TRANSPORT_HEADER, encodeURIComponent(requestPragma));
+  }
+  if (queryRestore !== undefined) {
+    headers.set(RESPONSE_STAGE_QUERY_TRANSPORT_HEADER, JSON.stringify(queryRestore));
   }
   const init = {
     // Explicitly replace inherited inbound `cf` metadata. In workerd,
@@ -334,6 +342,7 @@ function restoreResponseStageRequest(
   headers.delete(REQUEST_CACHE_CONTROL_TRANSPORT_HEADER);
   headers.delete(REQUEST_CF_TRANSPORT_HEADER);
   headers.delete(REQUEST_PRAGMA_TRANSPORT_HEADER);
+  headers.delete(RESPONSE_STAGE_QUERY_TRANSPORT_HEADER);
   if (serializedAuthorization !== null) {
     try {
       headers.set("Authorization", decodeURIComponent(serializedAuthorization));
@@ -540,6 +549,8 @@ function getResponseStageInvocation(
   if (typeof requestUrl !== "string") return null;
   const requestMethod = Reflect.get(value, "requestMethod");
   if (typeof requestMethod !== "string" || requestMethod.length === 0) return null;
+  const queryIndependent = Reflect.get(value, "queryIndependent");
+  if (queryIndependent !== undefined && queryIndependent !== true) return null;
   try {
     new URL(requestUrl);
   } catch {
@@ -551,9 +562,31 @@ function getResponseStageInvocation(
       : {}),
     options: { ...options, cache } as VinextResponseStageDispatchOptions,
     props: Reflect.get(value, "props"),
+    ...(queryIndependent === true ? { queryIndependent } : {}),
     requestMethod,
     requestUrl,
   };
+}
+
+function restoreQueryBearingInvocation(
+  request: Request,
+  invocation: CloudflareResponseStageInvocation,
+): CloudflareResponseStageInvocation | null {
+  if (invocation.queryIndependent !== true) return invocation;
+  const serialized = request.headers.get(RESPONSE_STAGE_QUERY_TRANSPORT_HEADER);
+  if (serialized === null) return null;
+  try {
+    const restored = restoreResponseStageCacheQuery(
+      invocation.requestUrl,
+      invocation.props,
+      JSON.parse(serialized),
+    );
+    return restored
+      ? { ...invocation, props: restored.props, requestUrl: restored.requestUrl }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 async function invokeResponseStage(
@@ -588,7 +621,10 @@ async function invokeResponseStage(
 export class VinextCachedResponse extends WorkerEntrypoint<unknown, unknown> {
   async fetch(request: Request): Promise<Response> {
     const context = withWorkerHostRuntime(this.ctx, this.env);
-    const invocation = getResponseStageInvocation(context.props, "shared");
+    const cacheInvocation = getResponseStageInvocation(context.props, "shared");
+    const invocation = cacheInvocation
+      ? restoreQueryBearingInvocation(request, cacheInvocation)
+      : null;
     if (!invocation) {
       return stampResponseStageBuildIdentity(
         new Response("Invalid vinext response-stage invocation", {
@@ -681,8 +717,19 @@ export default {
       };
       const usesSharedCache = options.cache === "shared";
       try {
+        const cacheIdentity = usesSharedCache
+          ? responseStageCacheIdentity(invocation.requestUrl, invocation.props)
+          : null;
+        const bindingInvocation = cacheIdentity
+          ? {
+              ...invocation,
+              ...(cacheIdentity.queryRestore ? { queryIndependent: true as const } : {}),
+              props: cacheIdentity.props,
+              requestUrl: cacheIdentity.requestUrl,
+            }
+          : invocation;
         const serializedInvocation = JSON.stringify({
-          ...invocation,
+          ...bindingInvocation,
           options:
             expectedResponseStageBuildIdentity === null
               ? options
@@ -700,7 +747,11 @@ export default {
           return responseStageUnavailable();
         }
         const entrypointRequest = usesSharedCache
-          ? await createCacheFacingRequest(stageRequest, invocation)
+          ? await createCacheFacingRequest(
+              stageRequest,
+              bindingInvocation,
+              cacheIdentity?.queryRestore,
+            )
           : stageRequest;
         const response = validateResponseStageBuildIdentity(await binding.fetch(entrypointRequest));
         return usesSharedCache

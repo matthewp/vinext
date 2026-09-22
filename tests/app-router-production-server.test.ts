@@ -1153,13 +1153,16 @@ describe("App Router Production server (startProdServer)", () => {
   // embedded), not re-render on every request. /revalidate-test exports
   // `revalidate = 60` and renders Date.now() into the HTML.
   it("export const revalidate: second request inside the cache window is a HIT with identical HTML", async () => {
-    const res1 = await fetch(`${baseUrl}/revalidate-test`);
+    // Next.js keys a proven prerender by resolved pathname (`ssgCacheKey`) and
+    // ignores arbitrary public query values for that static artifact.
+    // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/templates/app-page-runtime.ts
+    const res1 = await fetch(`${baseUrl}/revalidate-test?utm=first`);
     expect(res1.status).toBe(200);
     const html1 = await res1.text();
     const ts1 = html1.match(/data-testid="timestamp">(?:<!--[^>]*-->)*\s*(\d+)\s*</)?.[1];
     expect(ts1).toBeTruthy();
 
-    const res2 = await fetch(`${baseUrl}/revalidate-test`);
+    const res2 = await fetch(`${baseUrl}/revalidate-test?utm=second`);
     expect(res2.status).toBe(200);
     const html2 = await res2.text();
     const ts2 = html2.match(/data-testid="timestamp">(?:<!--[^>]*-->)*\s*(\d+)\s*</)?.[1];

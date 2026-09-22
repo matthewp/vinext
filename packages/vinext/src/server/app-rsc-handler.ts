@@ -276,6 +276,7 @@ export type AppRscHandlerRoute = {
   params?: readonly string[];
   page?: unknown;
   pattern: string;
+  queryIndependent?: boolean;
   rootParamNames?: readonly string[];
   routeHandler?: unknown;
   routeSegments: readonly string[];
@@ -2297,6 +2298,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
         mountedSlotsHeader,
         params,
         protocolVersion: APP_WORKER_RESPONSE_STAGE_PROTOCOL_VERSION,
+        ...(route.queryIndependent === true ? { queryIndependent: true as const } : {}),
         requestOrigin: url.origin,
         renderMode,
         resolvedUrl,

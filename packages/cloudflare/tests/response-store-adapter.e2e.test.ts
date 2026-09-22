@@ -192,6 +192,111 @@ describe("Cloudflare Workers Response Store adapter", () => {
     } satisfies MiniflareOptions);
 
     try {
+      const pathname = `/cached/self-contained-${crypto.randomUUID()}`;
+      const firstQuery = await inline.dispatchFetch(`https://app.test${pathname}?utm=first`);
+      const firstQueryBody = await firstQuery.text();
+      const secondQuery = await inline.dispatchFetch(`https://app.test${pathname}?utm=second`);
+      assert.equal(firstQuery.headers.get("x-vinext-cache"), "MISS");
+      assert.equal(secondQuery.headers.get("x-vinext-cache"), "HIT");
+      assert.equal(await secondQuery.text(), firstQueryBody);
+
+      const dynamicA = await inline.dispatchFetch("https://app.test/query-dependent?q=inline-a");
+      const dynamicABody = await dynamicA.text();
+      const dynamicARepeat = await inline.dispatchFetch(
+        "https://app.test/query-dependent?q=inline-a",
+      );
+      const dynamicARepeatBody = await dynamicARepeat.text();
+      const dynamicB = await inline.dispatchFetch("https://app.test/query-dependent?q=inline-b");
+      const dynamicBBody = await dynamicB.text();
+      assert.notEqual(dynamicA.headers.get("x-vinext-cache"), "HIT");
+      assert.notEqual(dynamicARepeat.headers.get("x-vinext-cache"), "HIT");
+      assert.notEqual(dynamicB.headers.get("x-vinext-cache"), "HIT");
+      assert.equal(htmlValue(dynamicABody, "query-dependent-value"), "inline-a");
+      assert.equal(htmlValue(dynamicARepeatBody, "query-dependent-value"), "inline-a");
+      assert.equal(htmlValue(dynamicBBody, "query-dependent-value"), "inline-b");
+      assert.notEqual(
+        htmlValue(dynamicABody, "query-dependent-render-id"),
+        htmlValue(dynamicARepeatBody, "query-dependent-render-id"),
+      );
+
+      const explicitQuery = `${crypto.randomUUID()}-a`;
+      const explicitFirst = await inline.dispatchFetch(
+        `https://app.test/api/query-cache?q=${explicitQuery}`,
+      );
+      const explicitFirstBody = await explicitFirst.text();
+      const explicitHit = await inline.dispatchFetch(
+        `https://app.test/api/query-cache?q=${explicitQuery}`,
+      );
+      assert.equal(explicitFirst.headers.get("x-vinext-cache"), "MISS");
+      assert.equal(explicitHit.headers.get("x-vinext-cache"), "HIT");
+      assert.equal(await explicitHit.text(), explicitFirstBody);
+      const explicitOtherQuery = `${crypto.randomUUID()}-b`;
+      const explicitOther = await inline.dispatchFetch(
+        `https://app.test/api/query-cache?q=${explicitOtherQuery}`,
+      );
+      const explicitOtherBody = await explicitOther.text();
+      const explicitOtherHit = await inline.dispatchFetch(
+        `https://app.test/api/query-cache?q=${explicitOtherQuery}`,
+      );
+      assert.equal(explicitOther.headers.get("x-vinext-cache"), "MISS");
+      assert.equal(explicitOtherHit.headers.get("x-vinext-cache"), "HIT");
+      assert.equal(JSON.parse(explicitOtherBody).query, explicitOtherQuery);
+      assert.notEqual(
+        JSON.parse(explicitFirstBody).renderId,
+        JSON.parse(explicitOtherBody).renderId,
+      );
+
+      const staticRouteFirst = await inline.dispatchFetch(
+        "https://app.test/api/query-independent?q=first",
+      );
+      const staticRouteBody = await staticRouteFirst.text();
+      const staticRouteFirstHit = await inline.dispatchFetch(
+        "https://app.test/api/query-independent?q=first",
+      );
+      assert.equal(
+        staticRouteFirstHit.headers.get("x-vinext-cache"),
+        "HIT",
+        JSON.stringify(Object.fromEntries(staticRouteFirstHit.headers)),
+      );
+      const staticRouteSecond = await inline.dispatchFetch(
+        "https://app.test/api/query-independent?q=second",
+      );
+      assert.equal(
+        staticRouteSecond.headers.get("x-vinext-cache"),
+        "HIT",
+        JSON.stringify(Object.fromEntries(staticRouteSecond.headers)),
+      );
+      assert.equal(await staticRouteSecond.text(), staticRouteBody);
+      assert.equal(JSON.parse(staticRouteBody).query, null);
+
+      for (const query of ["unsafe-a", "unsafe-b"]) {
+        const first = await inline.dispatchFetch(
+          `https://app.test/api/query-dependent-revalidate?q=${query}`,
+        );
+        const firstBody = await first.text();
+        const hit = await inline.dispatchFetch(
+          `https://app.test/api/query-dependent-revalidate?q=${query}`,
+        );
+        assert.equal(first.headers.get("x-vinext-cache"), "MISS");
+        assert.equal(hit.headers.get("x-vinext-cache"), "HIT");
+        assert.equal(await hit.text(), firstBody);
+        assert.equal(JSON.parse(firstBody).query, query);
+      }
+
+      for (const query of ["page-a", "page-b"]) {
+        const first = await inline.dispatchFetch(
+          `https://app.test/query-dependent-public?q=${query}`,
+        );
+        const firstBody = await first.text();
+        const hit = await inline.dispatchFetch(
+          `https://app.test/query-dependent-public?q=${query}`,
+        );
+        assert.equal(first.headers.get("x-vinext-cache"), "MISS");
+        assert.equal(hit.headers.get("x-vinext-cache"), "HIT");
+        assert.equal(await hit.text(), firstBody);
+        assert.equal(htmlValue(firstBody, "query-dependent-public-value"), query);
+      }
+
       const fetch = () => inline.dispatchFetch("https://app.test/api/now");
       const first = await fetch();
       const firstBody = await first.text();
@@ -316,6 +421,10 @@ describe("Cloudflare Workers Response Store adapter", () => {
       assert.equal(secondPageResponse.headers.get(name), null);
     }
 
+    const differentPath = await cacheStatus(`/cached/${crypto.randomUUID()}?utm=first`);
+    assert.equal(differentPath.status, "MISS");
+    assert.notEqual(differentPath.body, firstPage.body);
+
     const firstRoute = await cacheStatus("/api/now");
     const secondRoute = await cacheStatus("/api/now");
     assert.equal(firstRoute.status, "MISS");
@@ -329,12 +438,89 @@ describe("Cloudflare Workers Response Store adapter", () => {
     assert.equal(secondPages.body, firstPages.body);
 
     const init = { headers: { Accept: "text/x-component", RSC: "1" } };
-    const firstRsc = await request("/cached/rsc.rsc?_rsc=", init);
+    const firstRsc = await request("/cached/rsc.rsc?view=first&_rsc=first", init);
     const firstBody = await firstRsc.text();
-    const secondRsc = await request("/cached/rsc.rsc?_rsc=", init);
+    const secondRsc = await request("/cached/rsc.rsc?view=second&_rsc=second", init);
     assert.equal(firstRsc.headers.get("x-vinext-cache"), "MISS");
     assert.equal(secondRsc.headers.get("x-vinext-cache"), "HIT");
+    const renderedPath = secondRsc.headers.get("x-vinext-rendered-path-and-search");
+    assert.ok(renderedPath);
+    assert.equal(
+      new URL(decodeURIComponent(renderedPath), "https://app.test").searchParams.get("view"),
+      "second",
+    );
     assert.equal(await secondRsc.text(), firstBody);
+  });
+
+  test("keeps query-dependent output private and explicit public queries isolated", async () => {
+    const firstDynamic = await request("/query-dependent?q=alpha");
+    const firstDynamicBody = await firstDynamic.text();
+    const repeatedDynamic = await request("/query-dependent?q=alpha");
+    const repeatedDynamicBody = await repeatedDynamic.text();
+    const secondDynamic = await request("/query-dependent?q=beta");
+    const secondDynamicBody = await secondDynamic.text();
+    assert.notEqual(firstDynamic.headers.get("x-vinext-cache"), "HIT");
+    assert.notEqual(repeatedDynamic.headers.get("x-vinext-cache"), "HIT");
+    assert.notEqual(secondDynamic.headers.get("x-vinext-cache"), "HIT");
+    assert.equal(htmlValue(firstDynamicBody, "query-dependent-value"), "alpha");
+    assert.equal(htmlValue(repeatedDynamicBody, "query-dependent-value"), "alpha");
+    assert.equal(htmlValue(secondDynamicBody, "query-dependent-value"), "beta");
+    assert.notEqual(
+      htmlValue(firstDynamicBody, "query-dependent-render-id"),
+      htmlValue(repeatedDynamicBody, "query-dependent-render-id"),
+    );
+
+    const queryA = `/api/query-cache?q=${crypto.randomUUID()}-a`;
+    const queryB = `/api/query-cache?q=${crypto.randomUUID()}-b`;
+    const firstA = await cacheStatus(queryA);
+    const hitA = await cacheStatus(queryA);
+    const firstB = await cacheStatus(queryB);
+    const hitB = await cacheStatus(queryB);
+    assert.equal(firstA.status, "MISS");
+    assert.equal(hitA.status, "HIT");
+    assert.equal(firstB.status, "MISS");
+    assert.equal(hitB.status, "HIT");
+    assert.equal(hitA.body, firstA.body);
+    assert.equal(hitB.body, firstB.body);
+    assert.notEqual(JSON.parse(firstA.body).query, JSON.parse(firstB.body).query);
+    assert.notEqual(JSON.parse(firstA.body).renderId, JSON.parse(firstB.body).renderId);
+
+    const staticRouteFirst = await cacheStatus("/api/query-independent?q=first");
+    const staticRouteSecond = await cacheStatus("/api/query-independent?q=second");
+    assert.equal(staticRouteSecond.status, "HIT", staticRouteSecond.body);
+    assert.equal(staticRouteSecond.body, staticRouteFirst.body);
+    assert.equal(JSON.parse(staticRouteFirst.body).query, null);
+
+    for (const query of ["unsafe-a", "unsafe-b"]) {
+      const first = await cacheStatus(`/api/query-dependent-revalidate?q=${query}`);
+      const hit = await cacheStatus(`/api/query-dependent-revalidate?q=${query}`);
+      assert.equal(first.status, "MISS");
+      assert.equal(hit.status, "HIT");
+      assert.equal(hit.body, first.body);
+      assert.equal(JSON.parse(first.body).query, query);
+    }
+
+    for (const query of ["page-a", "page-b"]) {
+      const first = await request(`/query-dependent-public?q=${query}`);
+      const firstBody = await first.text();
+      const hit = await request(`/query-dependent-public?q=${query}`);
+      assert.equal(first.headers.get("x-vinext-cache"), "MISS");
+      assert.equal(hit.headers.get("x-vinext-cache"), "HIT");
+      assert.equal(await hit.text(), firstBody);
+      assert.equal(htmlValue(firstBody, "query-dependent-public-value"), query);
+    }
+  });
+
+  test("shares rewritten static pages by query without aliasing their destination", async () => {
+    const slug = `rewrite-${crypto.randomUUID()}`;
+    const first = await cacheStatus(`/query-rewrite/${slug}?utm=first`);
+    const second = await cacheStatus(`/query-rewrite/${slug}?utm=second`);
+    const direct = await cacheStatus(`/cached/${slug}?utm=direct`);
+
+    assert.equal(first.status, "MISS");
+    assert.equal(second.status, "HIT");
+    assert.equal(second.body, first.body);
+    assert.equal(direct.status, "MISS");
   });
 
   test("seeds canonical RSC from one HTML warmup request", async () => {

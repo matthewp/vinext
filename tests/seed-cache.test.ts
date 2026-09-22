@@ -19,6 +19,7 @@ import {
   type IncrementalCacheValue,
 } from "../packages/vinext/src/shims/cache.js";
 import { appIsrCacheKey } from "../packages/vinext/src/server/isr-cache.js";
+import { readAppPageCacheResponse } from "../packages/vinext/src/server/app-page-cache.js";
 import { getRenderedConcreteUrlPathsForRoute } from "../packages/vinext/src/server/pregenerated-concrete-paths.js";
 import { seedMemoryCacheFromPrerender } from "../packages/vinext/src/server/seed-cache.js";
 
@@ -80,7 +81,7 @@ describe("seedMemoryCacheFromPrerender", () => {
       serverDir,
       {
         buildId,
-        routes: [{ route: "/about", status: "rendered", revalidate: 60, router: "app" }],
+        routes: [{ route: "/about", status: "rendered", revalidate: false, router: "app" }],
       },
       {
         "about.html": "<html><body>About page</body></html>",
@@ -98,6 +99,7 @@ describe("seedMemoryCacheFromPrerender", () => {
     expect(htmlValue?.kind).toBe("APP_PAGE");
     if (htmlValue?.kind === "APP_PAGE") {
       expect(htmlValue.html).toBe("<html><body>About page</body></html>");
+      expect(htmlValue.prerendered).toBe(true);
     }
 
     const rscKey = appIsrCacheKey("/about", "rsc", buildId);
@@ -108,9 +110,39 @@ describe("seedMemoryCacheFromPrerender", () => {
     expect(rscValue?.kind).toBe("APP_PAGE");
     if (rscValue?.kind === "APP_PAGE") {
       expect(rscValue.rscData).toBeDefined();
+      expect(rscValue.prerendered).toBe(true);
       const rscText = new TextDecoder().decode(rscValue.rscData!);
       expect(rscText).toBe("RSC payload for about");
     }
+
+    const queryHit = await readAppPageCacheResponse({
+      cleanPathname: "/about",
+      clearRequestContext() {},
+      hasRequestSearchParams: true,
+      isRscRequest: false,
+      async isrGet(key) {
+        const value = await getCacheHandler().get(key);
+        if (!value) return null;
+        const isExpired = value.cacheState === "expired";
+        return {
+          value,
+          isStale: isExpired || value.cacheState === "stale",
+          ...(isExpired ? { isExpired: true } : {}),
+        };
+      },
+      isrHtmlKey: () => htmlKey,
+      isrRscKey: () => rscKey,
+      async isrSet() {},
+      revalidateSeconds: Infinity,
+      async renderFreshPageForCache() {
+        throw new Error("seeded query request should be a HIT");
+      },
+      scheduleBackgroundRegeneration() {
+        throw new Error("seeded query request should not regenerate");
+      },
+    });
+    expect(queryHit?.headers.get("x-vinext-cache")).toBe("HIT");
+    await expect(queryHit?.text()).resolves.toBe("<html><body>About page</body></html>");
   });
 
   it("seeds prerendered metadata responses as App Route entries", async () => {

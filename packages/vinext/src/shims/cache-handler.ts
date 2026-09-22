@@ -49,6 +49,8 @@ export type CachedAppPageValue = {
   rscData: ArrayBuffer | undefined;
   headers: Record<string, string | string[]> | undefined;
   postponed: string | undefined;
+  /** Trusted build-time prerenders cannot depend on a request query. */
+  prerendered?: true;
   renderObservation?: RenderObservation;
   status: number | undefined;
 };

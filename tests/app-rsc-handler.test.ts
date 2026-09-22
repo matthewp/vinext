@@ -121,8 +121,9 @@ type TestRoute = {
   params?: readonly string[];
   page?: { default?: unknown } | null;
   pattern: string;
+  queryIndependent?: boolean;
   rootParamNames?: readonly string[];
-  routeHandler?: { GET?: () => Response; runtime?: string } | null;
+  routeHandler?: { GET?: () => Response; dynamic?: string; runtime?: string } | null;
   routeSegments: readonly string[];
   slots?: AppRouteTreePrefetchRoute["slots"];
 };
@@ -771,6 +772,38 @@ describe("createAppRscHandler", () => {
     expect(dispatchResponseStage.mock.calls[0]?.[2]).toEqual({ cache: "shared" });
     expect(response.headers.get("x-handler")).toBe("head");
     expect(response.body).toBeNull();
+  });
+
+  it("certifies force-static route handlers as query-independent response stages", async () => {
+    const route = createPageRoute({
+      __loadPage: undefined,
+      __loadRouteHandler() {},
+      page: null,
+      pattern: "/route",
+      queryIndependent: true,
+      routeHandler: { dynamic: "force-static", GET: () => new Response("get") },
+      routeSegments: ["route"],
+    });
+    const dispatchResponseStage = vi.fn<DispatchAppWorkerResponseStage>(async () =>
+      Promise.resolve(new Response("route")),
+    );
+    const handler = createHandler({
+      configHeaders: [],
+      matchRoute: (pathname) => (pathname === "/route" ? { params: {}, route } : null),
+    });
+
+    await handler(
+      new Request("https://example.test/docs/route?query=one"),
+      null,
+      false,
+      dispatchResponseStage,
+    );
+
+    expect(dispatchResponseStage.mock.calls[0]?.[1]).toMatchObject({
+      kind: "app-route-handler",
+      queryIndependent: true,
+      resolvedUrl: "/route?query=one",
+    });
   });
 
   it("bypasses the shared response stage for valid draft mode requests", async () => {

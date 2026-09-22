@@ -247,6 +247,7 @@ async function seedHtml(
     rscData: undefined,
     headers,
     postponed: undefined,
+    prerendered: true,
     status: undefined,
   };
 
@@ -283,6 +284,7 @@ async function seedRsc(
     ),
     headers: undefined,
     postponed: undefined,
+    prerendered: true,
     status: undefined,
   };
 

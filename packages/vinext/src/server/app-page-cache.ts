@@ -209,8 +209,9 @@ function getCachedAppPageValue(entry: ISRCacheEntry | null): CachedAppPageValue 
 
 function hasQueryInvariantAppPageProof(cachedValue: CachedAppPageValue): boolean {
   return (
-    cachedValue.renderObservation !== undefined &&
-    hasCompleteNegativeRequestApiProof(cachedValue.renderObservation, ["searchParams"])
+    cachedValue.prerendered === true ||
+    (cachedValue.renderObservation !== undefined &&
+      hasCompleteNegativeRequestApiProof(cachedValue.renderObservation, ["searchParams"]))
   );
 }
 

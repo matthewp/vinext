@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { Buffer } from "node:buffer";
 import { buildPrerenderKVPairs } from "../packages/cloudflare/src/prerender-kv-populate.js";
+import { KVCacheHandler } from "../packages/cloudflare/src/cache/kv-data-adapter.runtime.js";
 import { createKvKeySpace } from "../packages/cloudflare/src/cache/kv-key.js";
+import { readAppPageCacheResponse } from "../packages/vinext/src/server/app-page-cache.js";
 import { appIsrCacheKey } from "../packages/vinext/src/server/isr-cache.js";
 
 let serverDir: string;
@@ -36,7 +38,7 @@ describe("buildPrerenderKVPairs", () => {
     fs.rmSync(serverDir, { recursive: true, force: true });
   });
 
-  it("builds KV entries for prerendered App Router HTML and RSC artifacts", () => {
+  it("builds and serves query-invariant KV entries for prerendered App Router artifacts", async () => {
     writePrerenderFixture(
       {
         buildId: "build-1",
@@ -78,6 +80,7 @@ describe("buildPrerenderKVPairs", () => {
         kind: "APP_PAGE",
         html: "<html>About</html>",
         headers: { link: "</font.woff2>; rel=preload; as=font" },
+        prerendered: true,
       },
       lastModified: 1_000,
       revalidateAt: 61_000,
@@ -93,8 +96,57 @@ describe("buildPrerenderKVPairs", () => {
     expect(rscEntry.value).toMatchObject({
       kind: "APP_PAGE",
       html: "",
+      prerendered: true,
       rscData: Buffer.from("flight").toString("base64"),
     });
+
+    const freshPairs = buildPrerenderKVPairs(serverDir, {
+      appPrefix: "site-a",
+      now: Date.now(),
+      ttlSeconds: 123,
+    }).pairs;
+    const store = new Map(freshPairs.map((pair) => [pair.key, pair.value]));
+    const handler = new KVCacheHandler(
+      {
+        async get(key: string | string[]) {
+          if (Array.isArray(key)) {
+            return new Map(key.map((item) => [item, store.get(item) ?? null]));
+          }
+          return store.get(key) ?? null;
+        },
+      } as never,
+      { appPrefix: "site-a" },
+    );
+    const htmlKey = appIsrCacheKey("/about", "html", "build-1");
+    const rscKey = appIsrCacheKey("/about", "rsc", "build-1");
+    const queryHit = await readAppPageCacheResponse({
+      cleanPathname: "/about",
+      clearRequestContext() {},
+      hasRequestSearchParams: true,
+      isRscRequest: false,
+      async isrGet(key) {
+        const value = await handler.get(key);
+        if (!value) return null;
+        const isExpired = value.cacheState === "expired";
+        return {
+          value,
+          isStale: isExpired || value.cacheState === "stale",
+          ...(isExpired ? { isExpired: true } : {}),
+        };
+      },
+      isrHtmlKey: () => htmlKey,
+      isrRscKey: () => rscKey,
+      async isrSet() {},
+      revalidateSeconds: 60,
+      async renderFreshPageForCache() {
+        throw new Error("seeded KV query request should be a HIT");
+      },
+      scheduleBackgroundRegeneration() {
+        throw new Error("seeded KV query request should not regenerate");
+      },
+    });
+    expect(queryHit?.headers.get("x-vinext-cache")).toBe("HIT");
+    await expect(queryHit?.text()).resolves.toBe("<html>About</html>");
   });
 
   it("builds an APP_ROUTE KV entry for prerendered metadata", () => {

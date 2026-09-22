@@ -37,7 +37,7 @@ test("deployment pre-warming and force-dynamic bypass work with the configured c
 
   expect(consecutiveReady, `${backend} Worker did not finish promotion`).toBe(5);
 
-  const warmed = await request.get(`${baseURL}/cached/intro`, {
+  const warmed = await request.get(`${baseURL}/cached/intro?utm=prewarmed-first`, {
     headers: { accept: "text/html" },
   });
   const warmedHeaders = warmed.headers();
@@ -56,7 +56,7 @@ test("deployment pre-warming and force-dynamic bypass work with the configured c
   expect(cachedAt).toBeLessThan(testStartedAt + 1_000);
 
   if (backend === "workers-cache" && warmedHeaders["cf-cache-status"] === "MISS") {
-    const reused = await request.get(`${baseURL}/cached/intro`, {
+    const reused = await request.get(`${baseURL}/cached/intro?utm=prewarmed-second`, {
       headers: { accept: "text/html" },
     });
     expect(reused.headers()["cf-cache-status"], JSON.stringify(reused.headers())).toBe("HIT");
@@ -79,6 +79,120 @@ test("deployment pre-warming and force-dynamic bypass work with the configured c
     cachedAt,
     slug: "intro",
   });
+
+  // Next.js keys a proven static App artifact by resolved pathname rather than
+  // arbitrary public query parameters.
+  // https://github.com/vercel/next.js/blob/canary/packages/next/src/build/templates/app-page-runtime.ts
+  const queryIndependentPath = `/cached/query-${randomUUID()}`;
+  const firstStatic = await request.get(`${baseURL}${queryIndependentPath}?utm=first`, {
+    headers: { accept: "text/html" },
+  });
+  const firstStaticBody = await firstStatic.text();
+  const secondStatic = await request.get(`${baseURL}${queryIndependentPath}?utm=second`, {
+    headers: { accept: "text/html" },
+  });
+  const staticStatusHeader = backend === "workers-cache" ? "cf-cache-status" : "x-vinext-cache";
+  expect(firstStatic.headers()[staticStatusHeader], JSON.stringify(firstStatic.headers())).toBe(
+    "MISS",
+  );
+  expect(secondStatic.headers()[staticStatusHeader], JSON.stringify(secondStatic.headers())).toBe(
+    "HIT",
+  );
+  expect(await secondStatic.text()).toBe(firstStaticBody);
+
+  const rewriteSlug = `query-rewrite-${randomUUID()}`;
+  const rewriteFirst = await request.get(`${baseURL}/query-rewrite/${rewriteSlug}?utm=first`);
+  const rewriteFirstBody = await rewriteFirst.text();
+  const rewriteSecond = await request.get(`${baseURL}/query-rewrite/${rewriteSlug}?utm=second`);
+  expect(rewriteFirst.headers()[staticStatusHeader], JSON.stringify(rewriteFirst.headers())).toBe(
+    "MISS",
+  );
+  expect(rewriteSecond.headers()[staticStatusHeader], JSON.stringify(rewriteSecond.headers())).toBe(
+    "HIT",
+  );
+  expect(await rewriteSecond.text()).toBe(rewriteFirstBody);
+  const rewriteDirect = await request.get(`${baseURL}/cached/${rewriteSlug}?utm=direct`);
+  expect(rewriteDirect.headers()[staticStatusHeader], JSON.stringify(rewriteDirect.headers())).toBe(
+    "MISS",
+  );
+  await rewriteDirect.dispose();
+
+  // Ported from Next.js:
+  // test/e2e/app-dir/searchparams-static-bailout/searchparams-static-bailout.test.ts
+  const firstQueryDynamic = await request.get(`${baseURL}/query-dependent?q=alpha`);
+  const repeatedQueryDynamic = await request.get(`${baseURL}/query-dependent?q=alpha`);
+  const secondQueryDynamic = await request.get(`${baseURL}/query-dependent?q=beta`);
+  const firstQueryDynamicBody = await firstQueryDynamic.text();
+  const repeatedQueryDynamicBody = await repeatedQueryDynamic.text();
+  const secondQueryDynamicBody = await secondQueryDynamic.text();
+  expect(firstQueryDynamic.headers()[staticStatusHeader]).not.toBe("HIT");
+  expect(repeatedQueryDynamic.headers()[staticStatusHeader]).not.toBe("HIT");
+  expect(secondQueryDynamic.headers()[staticStatusHeader]).not.toBe("HIT");
+  expect(firstQueryDynamicBody).toContain(
+    '<output data-testid="query-dependent-value">alpha</output>',
+  );
+  expect(secondQueryDynamicBody).toContain(
+    '<output data-testid="query-dependent-value">beta</output>',
+  );
+  expect(repeatedQueryDynamicBody).not.toBe(firstQueryDynamicBody);
+
+  const staticRouteFirst = await request.get(
+    `${baseURL}/api/query-independent?q=${randomUUID()}-first`,
+  );
+  const staticRouteBody = await staticRouteFirst.text();
+  const staticRouteSecond = await request.get(
+    `${baseURL}/api/query-independent?q=${randomUUID()}-second`,
+  );
+  expect(
+    staticRouteSecond.headers()[staticStatusHeader],
+    JSON.stringify(staticRouteSecond.headers()),
+  ).toBe("HIT");
+  expect(await staticRouteSecond.text()).toBe(staticRouteBody);
+  expect(JSON.parse(staticRouteBody).query).toBeNull();
+
+  if (backend !== "kv") {
+    const queryA = `${randomUUID()}-a`;
+    const queryB = `${randomUUID()}-b`;
+    const firstA = await request.get(`${baseURL}/api/query-cache?q=${queryA}`);
+    const hitA = await request.get(`${baseURL}/api/query-cache?q=${queryA}`);
+    const firstB = await request.get(`${baseURL}/api/query-cache?q=${queryB}`);
+    const hitB = await request.get(`${baseURL}/api/query-cache?q=${queryB}`);
+    expect(firstA.headers()[staticStatusHeader], JSON.stringify(firstA.headers())).toBe("MISS");
+    expect(hitA.headers()[staticStatusHeader], JSON.stringify(hitA.headers())).toBe("HIT");
+    expect(firstB.headers()[staticStatusHeader], JSON.stringify(firstB.headers())).toBe("MISS");
+    expect(hitB.headers()[staticStatusHeader], JSON.stringify(hitB.headers())).toBe("HIT");
+    const firstAPayload = (await firstA.json()) as { query: string; renderId: string };
+    const hitAPayload = (await hitA.json()) as { query: string; renderId: string };
+    const firstBPayload = (await firstB.json()) as { query: string; renderId: string };
+    const hitBPayload = (await hitB.json()) as { query: string; renderId: string };
+    expect(firstAPayload.query).toBe(queryA);
+    expect(hitAPayload).toEqual(firstAPayload);
+    expect(firstBPayload.query).toBe(queryB);
+    expect(hitBPayload).toEqual(firstBPayload);
+    expect(firstBPayload.renderId).not.toBe(firstAPayload.renderId);
+
+    for (const query of [`${randomUUID()}-unsafe-a`, `${randomUUID()}-unsafe-b`]) {
+      const first = await request.get(`${baseURL}/api/query-dependent-revalidate?q=${query}`);
+      const firstBody = await first.text();
+      const hit = await request.get(`${baseURL}/api/query-dependent-revalidate?q=${query}`);
+      expect(first.headers()[staticStatusHeader], JSON.stringify(first.headers())).toBe("MISS");
+      expect(hit.headers()[staticStatusHeader], JSON.stringify(hit.headers())).toBe("HIT");
+      expect(await hit.text()).toBe(firstBody);
+      expect(JSON.parse(firstBody).query).toBe(query);
+    }
+
+    for (const query of ["page-a", "page-b"]) {
+      const first = await request.get(`${baseURL}/query-dependent-public?q=${query}`);
+      const firstBody = await first.text();
+      const hit = await request.get(`${baseURL}/query-dependent-public?q=${query}`);
+      expect(first.headers()[staticStatusHeader], JSON.stringify(first.headers())).toBe("MISS");
+      expect(hit.headers()[staticStatusHeader], JSON.stringify(hit.headers())).toBe("HIT");
+      expect(await hit.text()).toBe(firstBody);
+      expect(firstBody).toContain(
+        `<output data-testid="query-dependent-public-value">${query}</output>`,
+      );
+    }
+  }
 
   const dynamicUrl = `${baseURL}/force-dynamic?cache-e2e=${randomUUID()}`;
   const firstDynamic = await request.get(dynamicUrl);

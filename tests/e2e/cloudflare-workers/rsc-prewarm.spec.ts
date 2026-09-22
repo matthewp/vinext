@@ -258,27 +258,27 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
   await waitForStablePromotion({ baseURL, buildId, playwright, rscBuildId });
 
   // A browser fetch() uses Accept: */* by default. The resolved App Page kind,
-  // rather than that header, must authorize a fresh HTML cache identity. This
-  // query is unique so the first response necessarily exercises Worker
-  // admission instead of the canonical entry populated during deployment.
+  // rather than that header, must authorize an HTML cache identity. Next.js
+  // keys the proven static artifact by pathname, so a second arbitrary query
+  // must reuse the same entry. This also proves configurable-entrypoint props
+  // do not retain a hidden query dimension.
   const browserFetchUrl = new URL("/cached/intro", baseURL);
-  browserFetchUrl.searchParams.set("browser-fetch", randomUUID());
-  const browserFetchMiss = await request.get(browserFetchUrl.href, {
-    headers: { accept: "*/*" },
-  });
-  const browserFetchMissHeaders = browserFetchMiss.headers();
-  expect(browserFetchMiss.ok(), JSON.stringify(browserFetchMissHeaders)).toBe(true);
-  expect(browserFetchMissHeaders["content-type"]).toContain("text/html");
-  expect(browserFetchMissHeaders["cf-cache-status"]).toBe("MISS");
-  expect(browserFetchMissHeaders["x-vinext-cache"]).toBe("MISS");
-  expect(browserFetchMissHeaders["x-nextjs-cache"]).toBe("MISS");
-  expect(browserFetchMissHeaders["cache-control"]).toBe("private, max-age=0, must-revalidate");
-  expect(browserFetchMissHeaders["cdn-cache-control"]).toBeUndefined();
-  expect(browserFetchMissHeaders["cloudflare-cdn-cache-control"]).toBeUndefined();
-  const browserFetchBody = await browserFetchMiss.text();
+  browserFetchUrl.searchParams.set("browser-fetch", `${randomUUID()}-first`);
+  const browserFetchFirst = await getReusableResponseAfterPromotion(
+    request,
+    browserFetchUrl.href,
+    { accept: "*/*" },
+    "browser fetch query-independent HTML",
+  );
+  const browserFetchFirstHeaders = browserFetchFirst.headers();
+  expect(browserFetchFirst.ok(), JSON.stringify(browserFetchFirstHeaders)).toBe(true);
+  expect(browserFetchFirstHeaders["content-type"]).toContain("text/html");
+  expect(browserFetchFirstHeaders["cf-cache-status"]).toBe("HIT");
+  const browserFetchBody = await browserFetchFirst.text();
 
-  const browserFetchHit = await request.get(browserFetchUrl.href, {
-    headers: { accept: "*/*" },
+  browserFetchUrl.searchParams.set("browser-fetch", `${randomUUID()}-second`);
+  const browserFetchHit = await getResponseAfterPromotion(request, browserFetchUrl.href, {
+    accept: "*/*",
   });
   const browserFetchHitHeaders = browserFetchHit.headers();
   expect(browserFetchHitHeaders["cf-cache-status"]).toBe("HIT");
@@ -321,7 +321,7 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
 
   const pagesResponse = await getReusableResponseAfterPromotion(
     request,
-    `${baseURL}${PAGES_TARGET_PATH}`,
+    `${baseURL}${PAGES_TARGET_PATH}?utm=first`,
     {
       ...htmlHeaders,
       "x-test-config-visitor": "config-a",
@@ -347,7 +347,7 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
 
   const secondPagesResponse = await getResponseAfterPromotion(
     request,
-    `${baseURL}${PAGES_TARGET_PATH}`,
+    `${baseURL}${PAGES_TARGET_PATH}?utm=second`,
     {
       ...htmlHeaders,
       "x-test-config-visitor": "config-b",
@@ -368,7 +368,7 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
   const pagesDataUrl = `${baseURL}/_next/data/${buildId}/pages-prewarm.json`;
   const pagesDataResponse = await getReusableResponseAfterPromotion(
     request,
-    pagesDataUrl,
+    `${pagesDataUrl}?utm=first`,
     {
       accept: "application/json",
       "x-nextjs-data": "1",
@@ -386,12 +386,16 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
   const pagesDataBody = await pagesDataResponse.text();
   expect(JSON.parse(pagesDataBody)).toMatchObject({ pageProps: { draftMode: false } });
 
-  const secondPagesDataResponse = await getResponseAfterPromotion(request, pagesDataUrl, {
-    accept: "application/json",
-    "x-nextjs-data": "1",
-    "x-test-config-visitor": "config-b",
-    "x-test-visitor-id": "visitor-b",
-  });
+  const secondPagesDataResponse = await getResponseAfterPromotion(
+    request,
+    `${pagesDataUrl}?utm=second`,
+    {
+      accept: "application/json",
+      "x-nextjs-data": "1",
+      "x-test-config-visitor": "config-b",
+      "x-test-visitor-id": "visitor-b",
+    },
+  );
   const secondPagesDataHeaders = secondPagesDataResponse.headers();
   expect(secondPagesDataResponse.ok(), JSON.stringify(secondPagesDataHeaders)).toBe(true);
   expect(secondPagesDataHeaders["cf-cache-status"]).toBe("HIT");
@@ -401,7 +405,7 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
 
   const appHtmlResponse = await getReusableResponseAfterPromotion(
     request,
-    `${baseURL}${TARGET_PATH}`,
+    `${baseURL}${TARGET_PATH}?utm=first`,
     {
       ...htmlHeaders,
       "x-test-config-visitor": "config-a",
@@ -424,7 +428,7 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
 
   const secondAppHtmlResponse = await getResponseAfterPromotion(
     request,
-    `${baseURL}${TARGET_PATH}`,
+    `${baseURL}${TARGET_PATH}?utm=second`,
     {
       ...htmlHeaders,
       "x-test-config-visitor": "config-b",
@@ -510,7 +514,7 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
 
   const fullResponse = await getReusableResponseAfterPromotion(
     request,
-    `${baseURL}${TARGET_PATH}?_rsc`,
+    `${baseURL}${TARGET_PATH}?view=first&_rsc=first`,
     { ...fullHeaders, "x-test-visitor-id": "visitor-a" },
     "full RSC",
   );
@@ -529,7 +533,7 @@ test("deploy-prewarmed variants are reused and late-dynamic HTML stays private",
 
   const secondFullResponse = await getResponseAfterPromotion(
     request,
-    `${baseURL}${TARGET_PATH}?_rsc`,
+    `${baseURL}${TARGET_PATH}?view=second&_rsc=second`,
     { ...fullHeaders, "x-test-visitor-id": "visitor-b" },
   );
   const secondFullResponseHeaders = secondFullResponse.headers();

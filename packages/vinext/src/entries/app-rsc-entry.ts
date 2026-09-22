@@ -239,8 +239,8 @@ type AppRouterConfig = {
 
 function buildAppRequestRouteMetadata(routes: AppRoute[]): unknown[] {
   const sourceCache = new Map<string, string | null>();
-  const forcesDynamic = (filePath: string | null | undefined): boolean => {
-    if (!filePath) return false;
+  const dynamicConfig = (filePath: string | null | undefined): string | null => {
+    if (!filePath) return null;
     let source = sourceCache.get(filePath);
     if (source === undefined) {
       try {
@@ -250,8 +250,10 @@ function buildAppRequestRouteMetadata(routes: AppRoute[]): unknown[] {
       }
       sourceCache.set(filePath, source);
     }
-    return source !== null && extractExportConstString(source, "dynamic") === "force-dynamic";
+    return source === null ? null : extractExportConstString(source, "dynamic");
   };
+  const forcesDynamic = (filePath: string | null | undefined): boolean =>
+    dynamicConfig(filePath) === "force-dynamic";
 
   return routes.map((route) => ({
     canUseCanonicalLoadingShell: appRouteHasMainTreeLoadingBoundary(route),
@@ -281,6 +283,10 @@ function buildAppRequestRouteMetadata(routes: AppRoute[]): unknown[] {
     params: route.params,
     rootParamNames: route.rootParamNames ?? [],
     page: route.pagePath ? true : null,
+    queryIndependent:
+      route.routePath && ["force-static", "error"].includes(dynamicConfig(route.routePath) ?? "")
+        ? true
+        : undefined,
     routeHandler: route.routePath ? true : null,
     routeSegments: route.routeSegments,
     layouts: [],

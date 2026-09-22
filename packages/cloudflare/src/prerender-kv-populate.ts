@@ -150,6 +150,7 @@ export function buildPrerenderKVPairs(
           kind: "APP_PAGE",
           html: fs.readFileSync(htmlPath, "utf-8"),
           headers: route.headers,
+          prerendered: true,
         },
         tags,
         now,
@@ -169,6 +170,7 @@ export function buildPrerenderKVPairs(
           {
             kind: "APP_PAGE",
             html: "",
+            prerendered: true,
             rscData,
           },
           tags,

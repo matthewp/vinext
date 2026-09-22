@@ -46,6 +46,8 @@ export type AppMatchedWorkerResponseStageProps = AppWorkerResponseStageEnvelope 
   matchKind: "interception" | "request" | "resolved";
   mountedSlotsHeader: string | null;
   params: AppPageParams;
+  /** Trusted Next.js static-generation eligibility for pathname-keyed output. */
+  queryIndependent?: true;
   resolvedUrl: string;
   routePattern: string;
   routePathname: string;
@@ -224,6 +226,7 @@ export function isAppWorkerResponseStageProps(
       props.matchKind === "resolved") &&
     (props.mountedSlotsHeader === null || typeof props.mountedSlotsHeader === "string") &&
     isAppPageParams(props.params) &&
+    (props.queryIndependent === undefined || props.queryIndependent === true) &&
     typeof props.resolvedUrl === "string" &&
     props.resolvedUrl.startsWith("/") &&
     typeof props.routePattern === "string" &&

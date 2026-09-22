@@ -670,8 +670,10 @@ describe("Cloudflare CDN multi-stage Worker facade", () => {
 
   it("shares query-independent App page cache identities across search params", async () => {
     const cacheFacingRequests: Request[] = [];
+    const cacheFacingInvocations: unknown[] = [];
     const binding = vi.fn(({ props }: { props: unknown }) => ({
       fetch(request: Request) {
+        cacheFacingInvocations.push(props);
         cacheFacingRequests.push(request);
         return createEntrypoint(props).fetch(request);
       },
@@ -707,12 +709,142 @@ describe("Cloudflare CDN multi-stage Worker facade", () => {
     expect(cacheFacingRequests[0]?.url).toMatch(
       /^https:\/\/example\.com\/page\?__vinext_cache_key=[0-9a-f]{64}$/,
     );
+    expect(cacheFacingInvocations[1]).toEqual(cacheFacingInvocations[0]);
+    expect(cacheFacingInvocations[0]).toMatchObject({
+      props: { resolvedUrl: "/page" },
+      queryIndependent: true,
+      requestUrl: "https://example.com/page",
+    });
     await expect(responses[0]?.json()).resolves.toEqual({
       url: "https://example.com/page?filter=first",
     });
     await expect(responses[1]?.json()).resolves.toEqual({
       url: "https://example.com/page?filter=second",
     });
+  });
+
+  it("restores every Pages query-bearing render input only on a cache miss", async () => {
+    const cacheFacingInvocations: unknown[] = [];
+    const binding = vi.fn(({ props }: { props: unknown }) => ({
+      fetch(request: Request) {
+        cacheFacingInvocations.push(props);
+        return createEntrypoint(props).fetch(request);
+      },
+    }));
+    stages.response.mockImplementation((request, _env, _ctx, props) =>
+      Response.json({ props, url: request.url }),
+    );
+    stages.request.mockImplementation((request, _env, _ctx, dispatch) =>
+      dispatch(
+        request,
+        pagesPageProps("/destination?resolved=two", {
+          originalUrl: "/source?original=three",
+        }),
+        { cache: "shared" },
+      ),
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.com/source?request=one"),
+      {},
+      { exports: { VinextCachedResponse: binding } },
+    );
+
+    expect(cacheFacingInvocations[0]).toMatchObject({
+      props: {
+        renderOptions: { originalUrl: "/source" },
+        resolvedUrl: "/destination",
+      },
+      requestUrl: "https://example.com/source",
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      props: {
+        renderOptions: { originalUrl: "/source?original=three" },
+        resolvedUrl: "/destination?resolved=two",
+      },
+      url: "https://example.com/source?request=one",
+    });
+  });
+
+  it("restores hybrid Pages request and resolved queries only on a cache miss", async () => {
+    const cacheFacingInvocations: unknown[] = [];
+    const binding = vi.fn(({ props }: { props: unknown }) => ({
+      fetch(request: Request) {
+        cacheFacingInvocations.push(props);
+        return createEntrypoint(props).fetch(request);
+      },
+    }));
+    stages.response.mockImplementation((request, _env, _ctx, props) =>
+      Response.json({ props, url: request.url }),
+    );
+    stages.request.mockImplementation((request, _env, _ctx, dispatch) =>
+      dispatch(
+        request,
+        {
+          kind: "hybrid-pages",
+          preHandlerHeaders: null,
+          requestUrl: "https://example.com/source?props=three",
+          resolvedUrl: "/destination?resolved=two",
+          resourceKind: "page",
+        },
+        { cache: "shared" },
+      ),
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.com/source?request=one"),
+      {},
+      { exports: { VinextCachedResponse: binding } },
+    );
+
+    expect(cacheFacingInvocations[0]).toMatchObject({
+      props: {
+        requestUrl: "https://example.com/source",
+        resolvedUrl: "/destination",
+      },
+      requestUrl: "https://example.com/source",
+    });
+    await expect(response.json()).resolves.toMatchObject({
+      props: {
+        requestUrl: "https://example.com/source?props=three",
+        resolvedUrl: "/destination?resolved=two",
+      },
+      url: "https://example.com/source?request=one",
+    });
+  });
+
+  it("transports a maximum-size query without duplicating full URLs", async () => {
+    const cacheFacingRequests: Request[] = [];
+    const binding = vi.fn(({ props }: { props: unknown }) => ({
+      fetch(request: Request) {
+        cacheFacingRequests.push(request);
+        return createEntrypoint(props).fetch(request);
+      },
+    }));
+    stages.response.mockResolvedValue(new Response("rendered"));
+    stages.request.mockImplementation((request, _env, _ctx, dispatch) => {
+      const url = new URL(request.url);
+      return dispatch(
+        request,
+        {
+          cacheability: { policyHeaders: null },
+          kind: "app-page",
+          resolvedUrl: url.pathname + url.search,
+        },
+        { cache: "shared" },
+      );
+    });
+    const query = `%26`.repeat(5_000);
+
+    await worker.fetch(
+      new Request(`https://example.com/page?q=${query}`),
+      {},
+      { exports: { VinextCachedResponse: binding } },
+    );
+
+    const transport = cacheFacingRequests[0]?.headers.get("x-vinext-internal-response-stage-query");
+    expect(transport).not.toBeNull();
+    expect(transport!.length).toBeLessThan(16_000);
   });
 
   it("keeps explicitly query-dependent App page cache identities isolated", async () => {
@@ -1466,6 +1598,7 @@ describe("Cloudflare CDN multi-stage Worker facade", () => {
       stages.response.mockImplementation((request) =>
         Response.json({
           authorizationTransport: request.headers.get("x-vinext-internal-authorization"),
+          queryTransport: request.headers.get("x-vinext-internal-response-stage-query"),
           requestCfTransport: request.headers.get("x-vinext-internal-request-cf"),
         }),
       );
@@ -1474,6 +1607,7 @@ describe("Cloudflare CDN multi-stage Worker facade", () => {
         new Request("https://example.com/private", {
           headers: {
             "x-vinext-internal-authorization": "forged-authorization",
+            "x-vinext-internal-response-stage-query": "forged-query",
             "x-vinext-internal-request-cf": "forged-request-cf",
           },
         }),
@@ -1488,6 +1622,7 @@ describe("Cloudflare CDN multi-stage Worker facade", () => {
 
       await expect(response.json()).resolves.toEqual({
         authorizationTransport: null,
+        queryTransport: null,
         requestCfTransport: null,
       });
       stages.request.mockReset();
