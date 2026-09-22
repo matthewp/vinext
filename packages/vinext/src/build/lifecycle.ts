@@ -55,6 +55,13 @@ export type BuildLifecycleResult = {
   standalone: boolean;
 };
 
+export const VINEXT_BUILD_LIFECYCLE_CONFIG = "__vinextBuildLifecycle";
+
+export type BuildLifecycleInvocation = {
+  onComplete?: (result: BuildLifecycleResult) => void;
+  skipPrerender?: boolean;
+};
+
 type BuildLifecycleState = {
   pagesClientAssetsBuildSession?: string;
 };
@@ -343,6 +350,7 @@ export async function runBuildLifecycle(
 export function createBuildLifecyclePlugins(options: {
   createContext: () => BuildLifecycleContext;
   isEnabled: (builder: ViteBuilder) => boolean;
+  onComplete?: (result: BuildLifecycleResult) => void;
   onPrepare?: () => void;
   shouldPrepare: (config: UserConfig | ResolvedConfig) => boolean;
   shouldBuildPlainPages: () => boolean;
@@ -370,7 +378,8 @@ export function createBuildLifecyclePlugins(options: {
         if (!state) return;
         states.delete(builder);
         try {
-          await finalizeBuild(builder, options.createContext());
+          const result = await finalizeBuild(builder, options.createContext());
+          options.onComplete?.(result);
         } finally {
           disposeBuild(state);
         }
