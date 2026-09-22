@@ -481,6 +481,16 @@ describe("Cloudflare Workers Response Store adapter", () => {
   });
 
   test("keeps query-dependent output private and explicit public queries isolated", async () => {
+    const warmupPublic = await request("/query-dependent-public?q=warmup", {
+      headers: { "user-agent": "vinext-cloudflare-cdn-warm" },
+    });
+    const warmupPublicBody = await warmupPublic.text();
+    assert.equal(warmupPublic.status, 200, warmupPublicBody);
+    assert.equal(warmupPublic.headers.get("x-vinext-cache"), "MISS");
+    const warmedPublic = await request("/query-dependent-public?q=warmup");
+    assert.equal(warmedPublic.headers.get("x-vinext-cache"), "HIT");
+    assert.equal(await warmedPublic.text(), warmupPublicBody);
+
     const firstDynamic = await request("/query-dependent?q=alpha");
     const firstDynamicBody = await firstDynamic.text();
     const repeatedDynamic = await request("/query-dependent?q=alpha");
