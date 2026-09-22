@@ -1,5 +1,26 @@
 # vinext
 
+## 1.0.0-beta.12
+
+### Bug Fixes
+
+- **Cache:** protect cache function references (#3385)
+- detect Wrangler with Bun on Windows (#3364)
+- **Cache:** isolate divergent App Router route identities (#3357)
+- **Metadata:** enforce static params for image routes (#3358)
+- **Dev:** initialize App instrumentation in the RSC runner (#3363)
+- **Dev:** pre-optimize Pages hydration runtime (#3356)
+- **Pages:** preserve production CSS graph order (#3314)
+- **Pages:** include resolved CSS aliases in dev manifest (#3355)
+- **App Router:** send anonymous crossOrigin on dynamic preloads and bootstrap hints (#3327)
+
+### Contributors
+
+- @james-elicx
+- @lyzno1
+- @snhsish
+- @yaner-here
+
 ## 1.0.0-beta.11
 
 ### Features
