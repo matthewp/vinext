@@ -17,6 +17,17 @@ describe("findViteRoot", () => {
       shouldPreflight: false,
     });
   });
+
+  it("parses valid short option clusters without hiding help", () => {
+    expect(findViteRoot("build", ["-dm", "staging", "project"])).toEqual({
+      root: "project",
+      shouldPreflight: true,
+    });
+    expect(findViteRoot("build", ["-hd", "project"])).toEqual({
+      root: "project",
+      shouldPreflight: false,
+    });
+  });
 });
 
 describe("isViteCliInvocation", () => {
