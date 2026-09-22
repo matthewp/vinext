@@ -51,10 +51,14 @@ export type PagesDataTarget = {
 
 type PagesDataNavigationTargetOptions = {
   locale?: string | false;
+  /** Force page identity while deriving params and data URLs from browserUrl. */
+  routePattern?: string;
 };
 
 type ClientMiddlewareMatcherObject = {
   source: string;
+  regexp?: string;
+  flags?: string;
   locale?: false;
   has?: unknown[];
   missing?: unknown[];
@@ -69,10 +73,24 @@ function hasVinextMiddleware(nextData: unknown): boolean {
 function isClientMiddlewareMatcherObject(value: unknown): value is ClientMiddlewareMatcherObject {
   if (!isUnknownRecord(value)) return false;
   if (typeof value.source !== "string") return false;
+  if (value.regexp !== undefined && typeof value.regexp !== "string") return false;
+  if (value.flags !== undefined && typeof value.flags !== "string") return false;
   if (value.locale !== undefined && value.locale !== false) return false;
   if (value.has !== undefined && !Array.isArray(value.has)) return false;
   if (value.missing !== undefined && !Array.isArray(value.missing)) return false;
   return true;
+}
+
+function compiledClientMiddlewareMatcherMatches(
+  pathname: string,
+  matcher: ClientMiddlewareMatcherObject,
+): boolean | null {
+  if (matcher.regexp === undefined) return null;
+  try {
+    return new RegExp(matcher.regexp, matcher.flags).test(pathname);
+  } catch {
+    return true;
+  }
 }
 
 function stripLocaleForMiddlewareMatcher(pathname: string): string {
@@ -126,7 +144,10 @@ function clientMiddlewareMatcherMatches(pathname: string, matcher: unknown): boo
     }
     if (!isClientMiddlewareMatcherObject(item)) return true;
     const candidate = item.locale === false ? pathname : stripLocaleForMiddlewareMatcher(pathname);
-    if (clientMiddlewareSourceMatches(candidate, item.source)) {
+    if (
+      compiledClientMiddlewareMatcherMatches(candidate, item) ??
+      clientMiddlewareSourceMatches(candidate, item.source)
+    ) {
       return true;
     }
   }
@@ -219,7 +240,10 @@ export function resolvePagesDataNavigationTarget(
   // present (`/fr`) the remainder is empty, which normalises to `/` (root).
   const pathForMatch = locale ? pagePath.slice(locale.length + 1) || "/" : pagePath;
 
-  const match = matchPagesPattern(pathForMatch, patterns);
+  const match = matchPagesPattern(
+    pathForMatch,
+    options.routePattern ? [options.routePattern] : patterns,
+  );
   if (!match) return null;
 
   const loader = loaders[match.pattern];

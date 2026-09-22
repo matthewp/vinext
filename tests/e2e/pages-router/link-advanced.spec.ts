@@ -446,30 +446,31 @@ test.describe("Link href/as bracket-pattern interpolation (Pages Router)", () =>
     expect(sawConcrete).toBe(true);
   });
 
-  // popstate (back/forward) reads `state.url` (set on push) as the route URL
-  // to fetch. If push stamped the bracket pattern into history state, forward
-  // traversal would re-issue the unservable URL even though the original push
-  // worked. Asserts state.url was interpolated, not the raw pattern.
-  test("forward popstate after dynamic Router.push fetches concrete URL", async ({ page }) => {
-    await page.goto(`${BASE}/link-test`);
+  // Query-only navigation preserves Next.js' bracket-pattern `state.url`, while
+  // popstate still has to fetch and render the concrete route on traversal.
+  test("forward popstate resolves query-only dynamic route history", async ({ page }) => {
+    await page.goto(`${BASE}/posts/1`);
     await page.waitForFunction(() => (window as any).__VINEXT_ROOT__);
 
-    // Push the dynamic destination, then go back to /link-test.
+    // Push the query-only destination, then traverse away from it.
     await page.evaluate(() => {
       const router = (window as any).next?.router;
-      return router?.push("/posts/[id]", "/posts/11");
+      return router?.push({ query: { id: "2" } });
     });
-    await expect(page.locator('[data-testid="post-title"]')).toHaveText("Post: 11");
+    await expect(page.locator('[data-testid="post-title"]')).toHaveText("Post: 2");
+    await expect
+      .poll(() => page.evaluate(() => ({ url: history.state?.url, as: history.state?.as })))
+      .toEqual({ url: "/posts/[id]?id=2", as: "/posts/2" });
     await page.goBack();
-    await expect(page).toHaveURL(`${BASE}/link-test`);
+    await expect(page.locator('[data-testid="post-title"]')).toHaveText("Post: 1");
 
     // Start capturing AFTER the back, so requests are scoped to the forward.
     const requests: string[] = [];
     page.on("request", (req) => requests.push(req.url()));
     await page.goForward();
 
-    await expect(page.locator('[data-testid="post-title"]')).toHaveText("Post: 11");
-    expect(page.url()).toBe(`${BASE}/posts/11`);
+    await expect(page.locator('[data-testid="post-title"]')).toHaveText("Post: 2");
+    expect(page.url()).toBe(`${BASE}/posts/2`);
 
     const routingRequests = requests.filter(
       (u) => /\/_next\/data\//.test(u) || /\/posts\/(?!.*\.tsx)/.test(u),

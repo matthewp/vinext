@@ -176,6 +176,39 @@ describe("prefetchPagesData", () => {
     expect(defaultLocaleTarget?.prefetchDataHref).toBe("/_next/data/build-id/en/ssg.json");
   });
 
+  it("keeps an explicit dynamic route identity when its concrete path is also static", () => {
+    const dynamicLoader = vi.fn(async () => ({ default: null }));
+    const staticLoader = vi.fn(async () => ({ default: null }));
+    vi.stubGlobal("window", {
+      location: { href: "http://localhost/fr/posts/2", origin: "http://localhost" },
+      __NEXT_DATA__: { buildId: "build-id" },
+      __VINEXT_LOCALE__: "fr",
+      __VINEXT_LOCALES__: ["en", "fr"],
+      __VINEXT_DEFAULT_LOCALE__: "en",
+      __VINEXT_PAGES_SSG_PATTERNS__: [],
+      __VINEXT_PAGES_SSP_PATTERNS__: ["/posts/[id]"],
+      __VINEXT_PAGE_LOADERS__: {
+        "/posts/[id]": dynamicLoader,
+        "/posts/2": staticLoader,
+      },
+      __VINEXT_PAGE_PATTERNS__: ["/posts/2", "/posts/[id]"],
+    });
+
+    const target = resolvePagesDataNavigationTarget("/fr/posts/2?id=2", "", {
+      locale: "fr",
+      routePattern: "/posts/[id]",
+    });
+
+    expect(target).toMatchObject({
+      dataHref: "/_next/data/build-id/fr/posts/2.json?id=2",
+      dataKind: "server",
+      loader: dynamicLoader,
+      params: { id: "2" },
+      pattern: "/posts/[id]",
+      prefetchLocale: "fr",
+    });
+  });
+
   it("evicts SSG middleware prefetches that opt out of the client cache", async () => {
     const fetchMock = vi.fn(
       async () => new Response("{}", { headers: { "x-middleware-cache": "no-cache" } }),

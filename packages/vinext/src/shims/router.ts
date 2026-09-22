@@ -57,7 +57,7 @@ import { resolveDirectHybridClientRouteOwner } from "./internal/hybrid-client-ro
 import { installWindowNext, type PagesRouterPublicInstance } from "../client/window-next.js";
 import { isUnknownRecord } from "../utils/record.js";
 import { isExternalUrl } from "../utils/external-url.js";
-import { splitPathSegments } from "../routing/utils.js";
+import { sortRoutes, splitPathSegments } from "../routing/utils.js";
 import {
   isAbsoluteUrl,
   isAbsoluteOrProtocolRelativeUrl,
@@ -83,11 +83,7 @@ import {
   parseQueryString,
   type UrlQuery,
 } from "../utils/query.js";
-import {
-  fillRoutePatternSegments,
-  matchRoutePattern,
-  routePatternParts,
-} from "../routing/route-pattern.js";
+import { matchRoutePattern, routePattern, routePatternParts } from "../routing/route-pattern.js";
 import { scrollToHashTarget } from "./hash-scroll.js";
 import {
   installPagesRouterRuntime,
@@ -95,7 +91,7 @@ import {
   setStampInitialHistoryState,
 } from "./pages-router-runtime.js";
 import { assertSafeNavigationUrl } from "./url-safety.js";
-import { interpolateDynamicRouteHref } from "./internal/interpolate-as.js";
+import { interpolateDynamicRouteHref, resolveDynamicRouteHref } from "./internal/interpolate-as.js";
 import { formatUrlObject, formatUrlObjectWithValidation } from "./internal/format-url-object.js";
 import { normalizeRouterHref } from "./internal/normalize-router-href.js";
 import { getCurrentRoutePathnameForWarning } from "./internal/route-pattern-for-warning.js";
@@ -654,11 +650,37 @@ function normalizeHydrationNavigationUrl(url: string): string {
 
 class HrefInterpolationError extends Error {}
 
-function interpolateCurrentDynamicRoute(resolved: string): string {
-  if (typeof window === "undefined") return resolved;
+function getHrefInterpolationError(
+  href: string,
+  routePattern: string,
+  query: UrlQuery,
+): HrefInterpolationError | null {
+  const missingParams = routePatternParts(routePattern)
+    .filter((part) => part.startsWith(":") && !part.endsWith("*"))
+    .map((part) => part.slice(1, part.endsWith("+") ? -1 : undefined))
+    .filter((paramName) => {
+      const value = query[paramName];
+      return value === undefined || value === "" || (Array.isArray(value) && value.length === 0);
+    });
+  return missingParams.length > 0
+    ? new HrefInterpolationError(
+        `The provided \`href\` (${href}) value is missing query values (${missingParams.join(
+          ", ",
+        )}) to be interpolated properly. Read more: https://nextjs.org/docs/messages/href-interpolation-failed`,
+      )
+    : null;
+}
+
+type CurrentDynamicRoute = { href: string; as: string | null };
+
+function resolveCurrentDynamicRoute(
+  resolved: string,
+  displayHref?: string,
+): CurrentDynamicRoute | null {
+  if (typeof window === "undefined") return null;
 
   const routePattern = window.__NEXT_DATA__?.page;
-  if (!routePattern || extractRouteParamNames(routePattern).length === 0) return resolved;
+  if (!routePattern || extractRouteParamNames(routePattern).length === 0) return null;
 
   try {
     const target = new URL(resolved, "http://vinext.local");
@@ -668,55 +690,37 @@ function interpolateCurrentDynamicRoute(resolved: string): string {
       target.origin !== "http://vinext.local" &&
       target.origin !== currentOrigin
     ) {
-      return resolved;
+      return null;
     }
     const visiblePath = stripBasePath(window.location.pathname, __basePath);
     const visibleLocale = getLocalePathPrefix(visiblePath, window.__VINEXT_LOCALES__);
     const routePath = visibleLocale
       ? visiblePath.slice(visibleLocale.length + 1) || "/"
       : visiblePath;
-    if (extractRouteParamsFromPath(routePattern, routePath) === null) return resolved;
+    if (extractRouteParamsFromPath(routePattern, routePath) === null) return null;
 
-    const query = parseQueryString(target.search);
-    const missingParams = routePatternParts(routePattern)
-      .filter((part) => part.startsWith(":") && !part.endsWith("*"))
-      .map((part) => part.slice(1, part.endsWith("+") ? -1 : undefined))
-      .filter((paramName) => {
-        const value = query[paramName];
-        return value === undefined || value === "" || (Array.isArray(value) && value.length === 0);
-      });
-    if (missingParams.length > 0) {
-      const href = `${routePattern}${target.search}${target.hash}`;
-      throw new HrefInterpolationError(
-        `The provided \`href\` (${href}) value is missing query values (${missingParams.join(
-          ", ",
-        )}) to be interpolated properly. Read more: https://nextjs.org/docs/messages/href-interpolation-failed`,
-      );
+    const href = routePattern + target.search + target.hash;
+    if (displayHref !== undefined) {
+      const projection = interpolateDynamicRouteHref(href, displayHref);
+      return { href, as: projection?.href || null };
     }
-
-    const routeParams = getRouteParamsFromQuery(routePattern, query);
-    if (!routeParams) return resolved;
-
-    const encodedRouteParams = Object.fromEntries(
-      Object.entries(routeParams).map(([key, value]) => [
-        key,
-        Array.isArray(value) ? value.map(encodeURIComponent) : encodeURIComponent(value),
-      ]),
-    );
-    const pathname = fillRoutePatternSegments(routePattern, encodedRouteParams);
-    if (!pathname) return resolved;
+    const dynamicRoute = resolveDynamicRouteHref(href);
+    if (!dynamicRoute) {
+      const error = getHrefInterpolationError(href, routePattern, parseQueryString(target.search));
+      if (error) throw error;
+      return null;
+    }
 
     const targetLocale = getLocalePathPrefix(target.pathname, window.__VINEXT_LOCALES__);
-    target.pathname = targetLocale ? `/${targetLocale}${pathname}` : pathname;
-    for (const paramName of extractRouteParamNames(routePattern)) {
-      target.searchParams.delete(paramName);
-    }
-    return target.href.slice(target.origin.length);
+    return {
+      href,
+      as: targetLocale ? `/${targetLocale}${dynamicRoute.as}` : dynamicRoute.as,
+    };
   } catch (error) {
     if (error instanceof HrefInterpolationError) {
       throw error;
     }
-    return resolved;
+    return null;
   }
 }
 
@@ -895,6 +899,20 @@ export function isHashOnlyChange(href: string): boolean {
   return isHashOnlyBrowserUrlChange(href, window.location.href, __basePath);
 }
 
+function toHistoryAppPath(url: string): string {
+  const origin = getWindowOrigin();
+  const localUrl = origin && url.startsWith(origin) ? url.slice(origin.length) : url;
+  if (!localUrl.startsWith("/") || localUrl.startsWith("//")) return url;
+  if (!__basePath) return localUrl;
+
+  const suffixIndex = localUrl.search(/[?#]/);
+  const pathname = suffixIndex === -1 ? localUrl : localUrl.slice(0, suffixIndex);
+  if (!hasBasePath(pathname, __basePath)) return localUrl;
+  return (
+    stripBasePath(pathname, __basePath) + (suffixIndex === -1 ? "" : localUrl.slice(suffixIndex))
+  );
+}
+
 /**
  * Build router-shaped state for the initial document entry. Captures the
  * active locale (from `window.__VINEXT_LOCALE__`) so a back-navigation
@@ -904,11 +922,22 @@ export function isHashOnlyChange(href: string): boolean {
  */
 function buildInitialRouterState(): VinextHistoryState {
   const appPath = stripBasePath(window.location.pathname, __basePath) + window.location.search;
+  const browserPath = window.location.pathname + window.location.search;
+  const nextData = window.__NEXT_DATA__;
+  const routeUrl = normalizePathTrailingSlash(
+    nextData?.page && getPagesMiddlewareDataHref(appPath, __basePath) === null
+      ? withBasePath(
+          formatUrlObject({ pathname: nextData.page, query: nextData.query }),
+          __basePath,
+        )
+      : browserPath,
+    __trailingSlash,
+  );
   const options: { locale?: string; shallow?: boolean } = {};
   if (window.__VINEXT_LOCALE__ !== undefined) options.locale = window.__VINEXT_LOCALE__;
   return {
-    url: appPath,
-    as: appPath,
+    url: routeUrl,
+    as: browserPath,
     options,
     __N: true,
     key: createHistoryKey(),
@@ -1248,11 +1277,11 @@ function resolvePagesNavigationPathname(
   return isFallback || (isAutoExportDynamic && !isReady) ? null : resolvedPath;
 }
 
-// Single-slot memo for the client pattern scan. `window.__VINEXT_PAGE_PATTERNS__`
-// is static after load, so the resolved pattern is a pure function of
-// (nextDataPage, resolvedPath). Caching avoids an O(routes) scan on every
-// useSyncExternalStore snapshot read (getPathname/getSearchParams/getParams),
-// which run repeatedly per render. Browser-only (one request at a time).
+// Single-slot memo for the client pattern scan. The pattern list changes only
+// when an HTML fallback teaches the router a new route, which invalidates this
+// cache. Caching avoids an O(routes) scan on every useSyncExternalStore
+// snapshot read (getPathname/getSearchParams/getParams), which run repeatedly
+// per render. Browser-only (one request at a time).
 let _cachedPagesRoutePatternKey: string | null = null;
 let _cachedPagesRoutePattern: string | undefined;
 
@@ -1430,7 +1459,8 @@ function getCurrentHistoryAsPath(): string | null {
   try {
     const browserUrl = new URL(window.location.href);
     const stateLocale = state.options.locale === false ? undefined : state.options.locale;
-    const localizedStateAs = applyNavigationLocale(state.as, stateLocale);
+    const stateAs = toHistoryAppPath(state.as);
+    const localizedStateAs = applyNavigationLocale(stateAs, stateLocale);
     const stateUrl = new URL(
       toBrowserNavigationHref(localizedStateAs, window.location.href, __basePath),
       window.location.href,
@@ -1438,11 +1468,11 @@ function getCurrentHistoryAsPath(): string | null {
     if (stateUrl.pathname !== browserUrl.pathname || stateUrl.search !== browserUrl.search) {
       return null;
     }
-    const stateAs = removeNavigationLocalePrefix(stripHash(state.as));
+    const appAs = removeNavigationLocalePrefix(stripHash(stateAs));
     const visibleAs = `${removeNavigationLocalePrefix(
       stripBasePath(window.location.pathname, __basePath),
     )}${window.location.search}`;
-    return `${stateAs || visibleAs}${window.location.hash}`;
+    return `${appAs || visibleAs}${window.location.hash}`;
   } catch {
     return null;
   }
@@ -1647,6 +1677,14 @@ type NavigateClientOptions = {
   mode?: "push" | "replace";
   scroll?: ScrollPosition | null;
   beforeHistoryChange?: () => void;
+  /** Concrete route URL used for data fetching while routePattern retains page identity. */
+  routeFetchUrl?: string;
+  /** Concrete browser URL used for middleware data probing. */
+  middlewareUrl?: string;
+  /** Route pattern used for loader lookup when a catch-all can also match the concrete URL. */
+  routePattern?: string;
+  /** Whether the route URL and browser URL are an explicit href/as mask. */
+  routeMasked?: boolean;
   /** Validated same-origin browser URL for a redirect with a leading-`//` app path. */
   redirectBrowserHref?: string;
 };
@@ -2737,6 +2775,26 @@ async function navigateClientHtml(
     );
   }
 
+  // Dev hydration initially registers only the server-rendered page. Reuse a
+  // module learned through the HTML fallback so later same-route navigations
+  // retain its route-pattern identity and can use the data path.
+  const pageLoaders = (window.__VINEXT_PAGE_LOADERS__ ??= {});
+  pageLoaders[nextData.page] ??= () => Promise.resolve(pageModule);
+  const pagePatterns = (window.__VINEXT_PAGE_PATTERNS__ ??= []);
+  if (!pagePatterns.includes(nextData.page)) {
+    pagePatterns.push(nextData.page);
+    const sortedPatterns = sortRoutes(
+      pagePatterns.map((pagePattern) => ({ pagePattern, pattern: routePattern(pagePattern) })),
+    );
+    pagePatterns.splice(
+      0,
+      pagePatterns.length,
+      ...sortedPatterns.map(({ pagePattern }) => pagePattern),
+    );
+    _cachedPagesRoutePatternKey = null;
+    _cachedPagesRoutePattern = undefined;
+  }
+
   // Import React for createElement
   const React = (await import("react")).default;
   assertStillCurrent();
@@ -2845,6 +2903,7 @@ async function navigateClient(
     } else {
       let browserUrl = url;
       let htmlFetchUrl = fetchUrl;
+      const routeMasked = options.routeMasked ?? routeUrl !== url;
       const configRedirect =
         hasClientRedirectRules() && clientConfigRedirectCouldMatch(browserUrl)
           ? await resolveClientConfigRedirect(browserUrl)
@@ -2857,7 +2916,7 @@ async function navigateClient(
         throw new InternalNavigationRedirect(redirectedUrl);
       }
       let routeLookupUrl = routeUrl;
-      if (routeUrl === url && hasClientRewriteRules()) {
+      if (!routeMasked && hasClientRewriteRules()) {
         const syncConfigRewrite = hasClientAppRouteManifest()
           ? undefined
           : resolveClientConfigRewriteSync(browserUrl);
@@ -2877,16 +2936,21 @@ async function navigateClient(
       // `_next/data/<id>/something-else.json` (the page that actually renders)
       // rather than `_next/data/<id>/hello.json` (the masked address). When
       // routeUrl === url (no mask), behaviour is unchanged.
-      const pagesDataTargetOptions = { locale: options.locale };
+      const pagesDataTargetOptions = {
+        locale: options.locale,
+        routePattern: options.routePattern,
+      };
+      const middlewareTargetOptions = { locale: options.locale };
       let dataTarget = resolvePagesDataNavigationTarget(
-        routeLookupUrl,
+        options.routeFetchUrl ?? routeLookupUrl,
         __basePath,
         pagesDataTargetOptions,
       );
       let middlewareDataResponse: Response | undefined;
       let middlewareEffect: MiddlewareDataEffect | null = null;
       let middlewareRewrittenTarget: PagesDataTarget | null | undefined;
-      const middlewareProbeDataHref = getMiddlewarePagesDataFetchUrl(browserUrl, dataTarget);
+      const middlewareUrl = options.middlewareUrl ?? browserUrl;
+      const middlewareProbeDataHref = getMiddlewarePagesDataFetchUrl(middlewareUrl, dataTarget);
       if (middlewareProbeDataHref !== null) {
         // If this navigation is superseded before middleware responds, we do
         // not yet know whether middleware would redirect/rewrite away from a
@@ -2896,7 +2960,7 @@ async function navigateClient(
         middlewareDataCacheEvictHref = getPagesDataCacheHref(middlewareProbeDataHref);
         try {
           middlewareEffect = await resolveMiddlewareDataEffect(
-            browserUrl,
+            middlewareUrl,
             controller.signal,
             dataTarget,
           );
@@ -2910,7 +2974,7 @@ async function navigateClient(
           middlewareRewrittenTarget = resolvePagesDataNavigationTarget(
             middlewareEffect.rewriteTarget,
             __basePath,
-            pagesDataTargetOptions,
+            middlewareTargetOptions,
           );
         }
         if (middlewareEffect) {
@@ -2933,9 +2997,9 @@ async function navigateClient(
         throw new InternalNavigationRedirect(redirectedUrl);
       } else if (middlewareEffect) {
         // A masked navigation probes middleware using the browser-visible URL but must fetch page
-        // data using the route URL. Without a rewrite header those are different requests, so do
-        // not reuse the probe response even though that means one extra request for this rare path.
-        if (middlewareEffect.rewriteTarget || routeUrl === url) {
+        // data using the route URL. Reuse the response only when a rewrite or an explicit probe URL
+        // proves that it targeted the route data request.
+        if (middlewareEffect.rewriteTarget || !routeMasked) {
           middlewareDataResponse = middlewareEffect.response;
         }
         if (middlewareEffect.rewriteTarget) {
@@ -2952,7 +3016,7 @@ async function navigateClient(
             resolvePagesDataNavigationTarget(
               middlewareEffect.rewriteTarget,
               __basePath,
-              pagesDataTargetOptions,
+              middlewareTargetOptions,
             );
           if (!rewrittenTarget) {
             options.beforeHistoryChange?.();
@@ -3143,7 +3207,7 @@ function dispatchNavigateEvent(): void {
  * @param fullUrl absolute URL committed to the browser (with basePath)
  * @param navState router-level metadata (`url`, `as`, `options`) the popstate
  *        handler needs to honour stickiness — most importantly the active
- *        locale and the canonical app-relative `as` path.
+ *        locale and the Next-compatible basePath-prefixed `as` path.
  */
 function updateHistory(
   mode: "push" | "replace",
@@ -3243,10 +3307,17 @@ async function performNavigation(
     throwNoRouterInstance();
   }
 
+  const isQueryOnlyString = typeof url === "string" && url.startsWith("?");
+  const urlInheritsCurrentPath =
+    (typeof url === "string" &&
+      (isQueryOnlyString || options?._vinextInterpolateDynamicRoute === true)) ||
+    (typeof url !== "string" &&
+      !url.pathname &&
+      (hasUrlObjectQuery(url) || (typeof url.search === "string" && url.search.length > 0)));
   const replaceInheritedLocale =
     options?.locale !== undefined &&
     (!as
-      ? typeof url !== "string" && inheritsVisiblePath(url)
+      ? urlInheritsCurrentPath || (typeof url !== "string" && inheritsVisiblePath(url))
       : typeof as !== "string" && inheritsVisiblePath(as));
 
   // Next.js treats a falsy `as` as omitted in prepareUrlAs().
@@ -3266,28 +3337,51 @@ async function performNavigation(
 
   const isHydrationQueryUpdate = options?._h === 1;
   const navigationLocale = resolveTransitionLocale(options?.locale);
+  const urlForResolution = isQueryOnlyString
+    ? `${stripBasePath(window.location.pathname, __basePath)}${url}`
+    : url;
+  const unlocalizedRouteHref = resolveUrl(urlForResolution);
+  const localRouteHref = isExternalUrl(unlocalizedRouteHref)
+    ? toSameOriginAppPath(unlocalizedRouteHref, __basePath)
+    : unlocalizedRouteHref;
+  const implicitDynamicRoute =
+    !isHydrationQueryUpdate && as === undefined && localRouteHref !== null
+      ? resolveDynamicRouteHref(localRouteHref)
+      : null;
+  const routeForNavigation = implicitDynamicRoute?.as ?? unlocalizedRouteHref;
   let resolved = isHydrationQueryUpdate
     ? normalizeHydrationNavigationUrl(as ?? resolveUrl(url))
-    : resolveNavigationTarget(url, as, navigationLocale, replaceInheritedLocale);
-  // `resolvedRoute` is the route-pattern URL (Next.js's internal `href`). It
-  // drives which page module renders and which `_next/data` payload is
-  // fetched. When `as` is absent it equals `resolved`. When `as` is a string
-  // (i.e. `<Link href="/route" as="/mask">`) it follows `url`, so the page
-  // module and data fetch target the actual route while the address bar shows
-  // the mask. Mirrors Next.js `Router.change()` keeping `parsedUrl.pathname`
-  // and `parsedAs.pathname` distinct.
+    : resolveNavigationTarget(routeForNavigation, as, navigationLocale, replaceInheritedLocale);
+  // Keep the browser/display URL (`resolved`), concrete route fetch URL
+  // (`resolvedRoute` after interpolation), and bracket-pattern route/history
+  // identity (`routeIdentityHref`) distinct, as Next.js Router.change() does.
   let resolvedRoute = isHydrationQueryUpdate
     ? normalizeHydrationNavigationUrl(resolveUrl(url))
-    : applyNavigationLocale(resolveUrl(url), navigationLocale, replaceInheritedLocale);
-  const inheritsCurrentPath =
-    as === undefined &&
-    ((typeof url === "string" && options?._vinextInterpolateDynamicRoute === true) ||
-      (typeof url !== "string" &&
-        !url.pathname &&
-        (hasUrlObjectQuery(url) || (typeof url.search === "string" && url.search.length > 0))));
-  if (inheritsCurrentPath) {
-    resolved = interpolateCurrentDynamicRoute(resolved);
-    resolvedRoute = interpolateCurrentDynamicRoute(resolvedRoute);
+    : applyNavigationLocale(routeForNavigation, navigationLocale, replaceInheritedLocale);
+  let routeIdentityHref = implicitDynamicRoute
+    ? removeNavigationLocalePrefix(implicitDynamicRoute.href)
+    : undefined;
+  if (urlInheritsCurrentPath) {
+    // Interpolate before locale application. A locale transition may produce
+    // a cross-origin domain URL, which cannot be matched against the current
+    // route pattern but still needs its dynamic params projected first.
+    const internalDynamicRoute = resolveCurrentDynamicRoute(unlocalizedRouteHref, as);
+    if (internalDynamicRoute) {
+      if (internalDynamicRoute.as) {
+        const localizedRoute = applyNavigationLocale(
+          internalDynamicRoute.as,
+          navigationLocale,
+          replaceInheritedLocale,
+        );
+        if (as === undefined) resolved = localizedRoute;
+        resolvedRoute = localizedRoute;
+      } else {
+        // Keep the bracket pattern intact so the normal interpolation block
+        // below can report an incompatible explicit `as` value.
+        resolvedRoute = internalDynamicRoute.href;
+      }
+      routeIdentityHref = internalDynamicRoute.href;
+    }
   }
 
   // Next.js validates the route href before the display `as` URL. An external
@@ -3318,6 +3412,10 @@ async function performNavigation(
     resolved = localPath;
   }
 
+  if (routeIdentityHref && isExternalUrl(routeIdentityHref)) {
+    routeIdentityHref = toSameOriginAppPath(routeIdentityHref, __basePath) ?? routeIdentityHref;
+  }
+
   resolved = normalizePathTrailingSlash(resolved, __trailingSlash);
   resolvedRoute = normalizePathTrailingSlash(resolvedRoute, __trailingSlash);
   // Bracket-pattern interpolation: callers that bypass <Link> (e.g.
@@ -3328,7 +3426,6 @@ async function performNavigation(
   // both 404 on those literal characters, so project the brackets back into
   // concrete values before deriving the fetch target. Mirrors Next.js
   // `Router.change()` which runs `interpolateAs(route, asPathname, query)`
-  // for the same reason (packages/next/src/shared/lib/router/router.ts L987+).
   //
   // Match-source priority: `as` first (extracts param values from the
   // resolved display URL), query second (object-form callers passing
@@ -3345,6 +3442,7 @@ async function performNavigation(
         : (url.query as UrlQuery),
     );
     if (projection?.href) {
+      routeIdentityHref ??= removeNavigationLocalePrefix(resolvedRoute);
       interpolatedRoute = projection.href;
 
       // No-mask case: caller didn't pass `as`, so the address bar would
@@ -3369,32 +3467,21 @@ async function performNavigation(
         );
       }
     } else {
-      const missingParams = projection
-        ? routePatternParts(projection.routePathname)
-            .filter((part) => part.startsWith(":") && !part.endsWith("*"))
-            .map((part) => part.slice(1, part.endsWith("+") ? -1 : undefined))
-            .filter((paramName) => {
-              const value = projection.query[paramName];
-              return (
-                value === undefined || value === "" || (Array.isArray(value) && value.length === 0)
-              );
-            })
-        : [];
-      const hasExplicitHrefPathname = typeof url === "string" || !inheritsCurrentPath;
+      const hrefInterpolationError = projection
+        ? getHrefInterpolationError(resolvedRoute, projection.routePathname, projection.query)
+        : null;
+      const hasExplicitHrefPathname = typeof url === "string" || !urlInheritsCurrentPath;
       const isMiddlewareMatch =
         options?.shallow !== true &&
         getPagesMiddlewareDataHref(resolved, __basePath, { locale: navigationLocale }) !== null;
-      if (missingParams.length > 0 && hasExplicitHrefPathname && !isMiddlewareMatch) {
+      if (hrefInterpolationError && hasExplicitHrefPathname && !isMiddlewareMatch) {
         const asPathname = stripHash(resolved).split("?", 1)[0];
         const routePathname =
           projection?.routePathname ?? stripHash(resolvedRoute).split("?", 1)[0];
         const shouldInterpolate = asPathname === routePathname;
+        if (shouldInterpolate) throw hrefInterpolationError;
         throw new HrefInterpolationError(
-          shouldInterpolate
-            ? `The provided \`href\` (${resolvedRoute}) value is missing query values (${missingParams.join(
-                ", ",
-              )}) to be interpolated properly. Read more: https://nextjs.org/docs/messages/href-interpolation-failed`
-            : `The provided \`as\` value (${asPathname}) is incompatible with the \`href\` value (${routePathname}). Read more: https://nextjs.org/docs/messages/incompatible-href-as`,
+          `The provided \`as\` value (${asPathname}) is incompatible with the \`href\` value (${routePathname}). Read more: https://nextjs.org/docs/messages/incompatible-href-as`,
         );
       }
 
@@ -3432,9 +3519,12 @@ async function performNavigation(
           __trailingSlash,
         )
       : full;
+  const routeFetchUrl = routeIdentityHref
+    ? replaceUrlPathname(routeIdentityHref, new URL(fullRouteUrl, window.location.href).pathname)
+    : undefined;
   const errorRouteHtmlFetchUrl = resolvePagesErrorHtmlFetchUrl(url, navigationLocale);
   const htmlFetchUrl =
-    errorRouteHtmlFetchUrl ?? getPagesHtmlFetchUrl(fullRouteUrl, navigationLocale);
+    errorRouteHtmlFetchUrl ?? getPagesHtmlFetchUrl(routeFetchUrl ?? fullRouteUrl, navigationLocale);
   const shallow = options?.shallow ?? false;
   const doScroll = options?.scroll !== false;
   const hash = extractHash(resolved);
@@ -3460,11 +3550,23 @@ async function performNavigation(
   if (redirectBrowserHref !== undefined) {
     navigateOptions.redirectBrowserHref = redirectBrowserHref;
   }
+  const routeMasked =
+    as !== undefined &&
+    stripHash(interpolatedRoute).split("?", 1)[0] !== stripHash(resolved).split("?", 1)[0];
+  if (routeFetchUrl) navigateOptions.routeFetchUrl = routeFetchUrl;
+  if (!routeMasked) navigateOptions.middlewareUrl = routeFetchUrl ?? fullRouteUrl;
+  navigateOptions.routeMasked = routeMasked;
+  if (routeIdentityHref) {
+    navigateOptions.routePattern = removeTrailingSlash(
+      stripHash(routeIdentityHref).split("?", 1)[0],
+    );
+  }
   const isHashOnlyNavigation = options?._h !== 1 && isHashOnlyChange(full);
 
   // History state metadata — surfaces the active locale to popstate and the
-  // Safari-replay filter. `as` is the canonical app-relative path (no
-  // basePath) used by the popstate handler and exposed to beforePopState.
+  // Safari-replay filter. Next.js stores basePath-prefixed `url` and `as`
+  // values and exposes them unchanged to beforePopState; the popstate handler
+  // strips basePath again before using either value for internal routing.
   // Hash-only strings are expanded against the current visible path just as
   // Next.js resolveHref() expands them before changeState().
   //
@@ -3477,9 +3579,16 @@ async function performNavigation(
   if (navigationLocale !== undefined) navStateOptions.locale = navigationLocale;
   const currentAppUrl =
     stripBasePath(window.location.pathname, __basePath) + window.location.search;
+  const historyRouteUrl = routeIdentityHref
+    ? normalizePathTrailingSlash(routeIdentityHref, __trailingSlash)
+    : interpolatedRoute;
+  const historyUrl = historyRouteUrl.startsWith("#")
+    ? currentAppUrl + historyRouteUrl
+    : historyRouteUrl;
+  const historyAs = resolved.startsWith("#") ? currentAppUrl + resolved : resolved;
   const navState = {
-    url: interpolatedRoute.startsWith("#") ? currentAppUrl + interpolatedRoute : interpolatedRoute,
-    as: resolved.startsWith("#") ? currentAppUrl + resolved : resolved,
+    url: normalizePathTrailingSlash(withBasePath(historyUrl, __basePath), __trailingSlash),
+    as: normalizePathTrailingSlash(withBasePath(historyAs, __basePath), __trailingSlash),
     options: navStateOptions,
   };
 
@@ -3558,8 +3667,7 @@ async function performNavigation(
   const hasAppRouteMarker =
     appPathEntry !== undefined && "__appRouter" in appPathEntry && appPathEntry.__appRouter;
   if (hasAppRouteMarker) {
-    if (mode === "push") window.location.assign(redirectBrowserHref ?? full);
-    else window.location.replace(redirectBrowserHref ?? full);
+    window.location.href = redirectBrowserHref ?? full;
     return new Promise<boolean>(() => {});
   }
   const rewrites = window.__VINEXT_CLIENT_REWRITES__;
@@ -3576,8 +3684,7 @@ async function performNavigation(
         )
       : resolveDirectHybridClientRouteOwner(resolved, __basePath);
   if (["app", "document"].includes(hybridOwner ?? "")) {
-    if (mode === "push") window.location.assign(redirectBrowserHref ?? full);
-    else window.location.replace(redirectBrowserHref ?? full);
+    window.location.href = redirectBrowserHref ?? full;
     return new Promise<boolean>(() => {});
   }
 
@@ -3613,10 +3720,6 @@ async function performNavigation(
       browserEventUrl,
       redirectBrowserHref ?? htmlFetchUrl,
       navigateOptions,
-      // When href and as differ, the data fetch must target the route URL
-      // (the module that actually renders), not the masked display URL.
-      // fullRouteUrl === full when there is no mask, so this is a no-op
-      // for the dominant case.
       fullRouteUrl,
       eventContext,
     );
@@ -3898,9 +4001,9 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
   // still points at the entry we were on, so a genuine navigation is *not*
   // misidentified as a replay.
   //
-  // `state.as` and Next.js's `router.asPath` are app-relative: neither carries
-  // basePath or the active locale prefix. Normalize the tracked browser URL to
-  // the same shape before comparing.
+  // `state.as` carries basePath while Next.js's `router.asPath` does not.
+  // Normalize both state and the tracked browser URL to the app-relative,
+  // locale-free shape before comparing.
   //
   // Mirrors Next.js's:
   //   if (isFirstPopStateEvent && this.locale === state.options.locale
@@ -3913,11 +4016,11 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
   // `lastPathnameAndSearch` and be incorrectly filtered).
   if (wasFirst && !routerRuntimeState.routerDidNavigate && isNextRouterState(state)) {
     const currentLocale = window.__VINEXT_LOCALE__;
-    if (
-      state.options?.locale === currentLocale &&
-      typeof state.as === "string" &&
-      state.as === getTrackedPagesRouterAsPath()
-    ) {
+    const stateAs =
+      typeof state.as === "string"
+        ? removeNavigationLocalePrefix(stripHash(toHistoryAppPath(state.as)))
+        : undefined;
+    if (state.options?.locale === currentLocale && stateAs === getTrackedPagesRouterAsPath()) {
       return;
     }
   }
@@ -4048,23 +4151,67 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
     // one. Mirrors Next.js's popstate handler around router.ts:971-995,
     // which keys page resolution off `state.url` (`href`) rather than the
     // browser URL.
-    const stateRouteUrl = (() => {
-      if (
-        isNextRouterState(state) &&
-        typeof state.url === "string" &&
-        typeof state.as === "string" &&
-        stripHash(state.url) !== stripHash(state.as)
-      ) {
-        return normalizePathTrailingSlash(withBasePath(state.url, __basePath), __trailingSlash);
+    let stateRouteUrl = browserUrl;
+    let stateFetchUrl = browserUrl;
+    let routeFetchUrl: string | undefined;
+    let routePattern: string | undefined;
+    let routeMasked = false;
+    if (
+      isNextRouterState(state) &&
+      typeof state.url === "string" &&
+      typeof state.as === "string" &&
+      stripHash(state.url) !== stripHash(state.as)
+    ) {
+      routeMasked = true;
+      const stateUrl = toHistoryAppPath(state.url);
+      const stateAs = toHistoryAppPath(state.as);
+      stateRouteUrl = normalizePathTrailingSlash(
+        withBasePath(stateUrl, __basePath),
+        __trailingSlash,
+      );
+      // Query-only dynamic history stores the route pattern in `url` and
+      // its parameter values in that URL's query. Interpolate only those
+      // values for the network request; keep the pattern for page lookup so
+      // a masked dynamic route cannot be mistaken for a colliding static page.
+      const dynamicRoute = interpolateDynamicRouteHref(
+        stateUrl,
+        removeNavigationLocalePrefix(stateAs),
+      );
+      const concreteRouteUrl = dynamicRoute?.href || stateUrl;
+      const fetchRouteUrl = applyNavigationLocale(concreteRouteUrl, effectiveLocale);
+      stateFetchUrl = normalizePathTrailingSlash(
+        withBasePath(fetchRouteUrl, __basePath),
+        __trailingSlash,
+      );
+      if (dynamicRoute?.href) {
+        routeFetchUrl = stateFetchUrl;
+        routePattern = removeTrailingSlash(
+          stripHash(removeNavigationLocalePrefix(stateUrl)).split("?", 1)[0],
+        );
       }
-      return browserUrl;
-    })();
+      const routePathname = getLocalPathname(concreteRouteUrl);
+      const displayPathname = getLocalPathname(stateAs);
+      routeMasked =
+        routePathname === null ||
+        displayPathname === null ||
+        removeNavigationLocalePrefix(routePathname) !==
+          removeNavigationLocalePrefix(displayPathname);
+    }
+    const middlewareUrl = routeMasked ? browserUrl : stateFetchUrl;
     const result = await runNavigateClient(
       browserUrl,
       fullEventUrl,
       getPagesHtmlFetchUrl(stateRouteUrl, effectiveLocale),
-      { scroll: scrollTarget, beforeHistoryChange: emitBeforeHistoryChange },
-      stateRouteUrl,
+      {
+        locale: effectiveLocale,
+        middlewareUrl,
+        routeFetchUrl,
+        routePattern,
+        routeMasked,
+        scroll: scrollTarget,
+        beforeHistoryChange: emitBeforeHistoryChange,
+      },
+      stateFetchUrl,
       eventContext,
     );
     if (typeof result === "object") {
