@@ -102,22 +102,28 @@ test("deployment pre-warming and force-dynamic bypass work with the configured c
   );
   expect(await secondStatic.text()).toBe(firstStaticBody);
 
-  const rewriteSlug = `query-rewrite-${randomUUID()}`;
-  const rewriteFirst = await request.get(`${baseURL}/query-rewrite/${rewriteSlug}?utm=first`);
-  const rewriteFirstBody = await rewriteFirst.text();
-  const rewriteSecond = await request.get(`${baseURL}/query-rewrite/${rewriteSlug}?utm=second`);
-  expect(rewriteFirst.headers()[staticStatusHeader], JSON.stringify(rewriteFirst.headers())).toBe(
-    "MISS",
-  );
-  expect(rewriteSecond.headers()[staticStatusHeader], JSON.stringify(rewriteSecond.headers())).toBe(
-    "HIT",
-  );
-  expect(await rewriteSecond.text()).toBe(rewriteFirstBody);
-  const rewriteDirect = await request.get(`${baseURL}/cached/${rewriteSlug}?utm=direct`);
-  expect(rewriteDirect.headers()[staticStatusHeader], JSON.stringify(rewriteDirect.headers())).toBe(
-    "MISS",
-  );
-  await rewriteDirect.dispose();
+  // Rewrite source/destination partitioning belongs to the response-stage
+  // adapters; the KV-only deployment has no outer response cache.
+  if (backend !== "kv") {
+    const rewriteSlug = `query-rewrite-${randomUUID()}`;
+    const rewriteFirst = await request.get(`${baseURL}/query-rewrite/${rewriteSlug}?utm=first`);
+    const rewriteFirstBody = await rewriteFirst.text();
+    const rewriteSecond = await request.get(`${baseURL}/query-rewrite/${rewriteSlug}?utm=second`);
+    expect(rewriteFirst.headers()[staticStatusHeader], JSON.stringify(rewriteFirst.headers())).toBe(
+      "MISS",
+    );
+    expect(
+      rewriteSecond.headers()[staticStatusHeader],
+      JSON.stringify(rewriteSecond.headers()),
+    ).toBe("HIT");
+    expect(await rewriteSecond.text()).toBe(rewriteFirstBody);
+    const rewriteDirect = await request.get(`${baseURL}/cached/${rewriteSlug}?utm=direct`);
+    expect(
+      rewriteDirect.headers()[staticStatusHeader],
+      JSON.stringify(rewriteDirect.headers()),
+    ).toBe("MISS");
+    await rewriteDirect.dispose();
+  }
 
   // Ported from Next.js:
   // test/e2e/app-dir/searchparams-static-bailout/searchparams-static-bailout.test.ts
